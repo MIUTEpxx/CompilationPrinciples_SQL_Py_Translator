@@ -8,28 +8,16 @@ KEYWORDS = {
     'SELECT', 'FROM', 'WHERE', 'CREATE', 'TABLE', 'INSERT', 'INTO',
     'VALUES', 'DELETE', 'UPDATE', 'SET', 'INT', 'VARCHAR', 'PRIMARY',
     'KEY', 'NOT', 'NULL', 'AND', 'OR', 'AS', 'DISTINCT', 'ORDER', 'BY',
-    'ASC', 'DESC', 'LIKE', 'IN', 'BETWEEN'
+    'ASC', 'DESC', 'LIKE', 'IN', 'BETWEEN', 'LIMIT', 'COUNT', 'SUM',
+    'AVG', 'MIN', 'MAX', 'GROUP', 'HAVING', 'UNIQUE'
 }
-
 # 操作符映射表
 OPERATORS = {
-    '=': 'EQ',
-    '<>': 'NEQ',
-    '!=': 'NEQ',
-    '<': 'LT',
-    '<=': 'LTE',
-    '=<': 'LTE',
-    '>': 'GT',
-    '>=': 'GTE',
-    '=>': 'GTE',
-    '+': 'PLUS',
-    '-': 'MINUS',
-    '*': 'ASTERISK',
-    '/': 'SLASH',
-    ',': 'COMMA',
-    '(': 'LPAREN',
-    ')': 'RPAREN',
-    ';': 'SEMI'
+    '=': 'EQ', '<>': 'NEQ', '!=': 'NEQ', '<': 'LT', '<=': 'LTE',
+    '=<': 'LTE', '>': 'GT', '>=': 'GTE', '=>': 'GTE',
+    '+': 'PLUS', '-': 'MINUS', '*': 'ASTERISK', '/': 'SLASH',
+    ',': 'COMMA', '(': 'LPAREN', ')': 'RPAREN', ';': 'SEMI',
+    '.': 'DOT', '[': 'LBRACKET', ']': 'RBRACKET'
 }
 
 
@@ -46,7 +34,6 @@ def mk_tk(tag, val=None):
 
 class BaseReader:
     """SQL命令 字符串/token列表 读取器"""
-
     def __init__(self, s, err, mod=STR_READER):
         self.err = err
         self.pos = -1  # 当前读取到的位置
@@ -106,7 +93,7 @@ def sql_lexer(input_str):
             c = reader.peek()
 
             # 跳过空白字符
-            if c.isspace():
+            if c.isspace() or (reader.peek() == '-' and reader.peek(1) == '-'):  # 跳过空白符 或 "--"注释
                 _skip_whitespace()
                 continue
 
@@ -135,9 +122,17 @@ def sql_lexer(input_str):
         return tokens
 
     def _skip_whitespace():
-        """跳过空白字符"""
-        while reader.peek() and reader.peek().isspace():
-            reader.next()
+        while True:
+            # 处理空白符
+            while reader.peek() in [' ', '\t', '\r', '\n']:
+                reader.next()
+            # 新增注释处理
+            if reader.peek() == '-':
+                while reader.peek() not in ['\n', '\r', 'eof']:
+                    reader.next()
+                continue
+            else:
+                break
 
     def _read_identifier():
         """读取标识符或关键字"""
@@ -242,6 +237,8 @@ def sql_parser(tokens):
                     statements.append(parse_select())
                 elif keyword == 'DELETE':
                     statements.append(parse_delete())
+                elif keyword == 'UPDATE':
+                    statements.append(parse_update())
                 else:
                     _error(f"未实现的语句类型: {keyword}")
             reader.match('SEMI')  # 吃掉语句结束符 ;
@@ -322,29 +319,102 @@ def sql_parser(tokens):
 
     def parse_select():
         """解析SELECT语句"""
-        columns = []
+        select_clause = {'columns': [], 'distinct': False}
+
+        # 处理DISTINCT关键字
+        if reader.peek() == 'DISTINCT':
+            select_clause['distinct'] = True
+            reader.next()
+
         # 解析选择的列
-        while reader.peek() not in ('FROM', 'WHERE'):
-            if reader.peek() == 'ASTERISK':  # *号, 表示全都要 SLECTE * WHERE ...
-                columns.append('*')
+        while reader.peek() not in ('FROM', 'eof'):
+            if reader.peek() == 'ASTERISK':
+                select_clause['columns'].append('*')
                 reader.next()
+            elif reader.peek() in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):
+                func = parse_aggregate_function()
+                select_clause['columns'].append(func)
             else:
-                columns.append(reader.next()[1])  # 选择特定的列数据 SELECTE name, age WHERE ...
+                # 处理列名和别名
+                col = reader.match('IDENTIFIER')[1]
+                if reader.peek() == 'AS':
+                    reader.next()
+                    alias = reader.match('IDENTIFIER')[1]
+                    select_clause['columns'].append({'name': col, 'alias': alias})
+                else:
+                    select_clause['columns'].append(col)
             if reader.peek() == 'COMMA':
-                reader.next()  # 吃掉逗号
-        reader.match('FROM')  # 吃掉 FROM
-        table_name = reader.match('IDENTIFIER')[1]  # 获取表名
-        # 解析WHERE条件
+                reader.next()
+
+        reader.match('FROM')
+        table_name = reader.match('IDENTIFIER')[1]
+
+        # 解析WHERE子句
         where_clause = None
         if reader.peek() == 'WHERE':
-            reader.next()  # 吃掉 WHERE
-            where_clause = parse_expression()
+            reader.next()
+            where_clause = parse_where_expression()
+
+        # 解析ORDER BY子句
+        order_by = None
+        if reader.peek() == 'ORDER':
+            reader.next()
+            reader.match('BY')
+            order_by = []
+            while reader.peek() not in ('LIMIT', 'SEMI', 'eof'):
+                col = reader.match('IDENTIFIER')[1]
+                direction = 'ASC'
+                if reader.peek() in ('ASC', 'DESC'):
+                    direction = reader.next()[0]
+                order_by.append({'column': col, 'direction': direction})
+                if reader.peek() == 'COMMA':
+                    reader.next()
+
+        # 解析LIMIT子句
+        limit = None
+        if reader.peek() == 'LIMIT':
+            reader.next()
+            limit = int(reader.match('NUMBER')[1])
+
         return {
             'type': 'select',
-            'columns': columns,
+            'select': select_clause,
             'table': table_name,
-            'where': where_clause
+            'where': where_clause,
+            'order_by': order_by,
+            'limit': limit
         }
+
+    def parse_where_expression():
+        left = reader.match('IDENTIFIER')[1]
+        op = reader.match('OPERATOR')[0]
+        right = None
+        if reader.peek() in ('NUMBER', 'STRING'):
+            right = reader.next()[1]
+        elif reader.peek() == 'IDENTIFIER':
+            right = reader.next()[1]
+        else:
+            _error(f"期望值，得到 {reader.peek()}")
+        return [left, op, right]
+
+    def parse_aggregate_function():
+        """聚合函数解析"""
+        func_name = reader.next()[0]
+        reader.match('LPAREN')
+        if reader.peek() == 'ASTERISK':
+            arg = '*'
+            reader.next()
+        else:
+            arg = reader.match('IDENTIFIER')[1]
+        reader.match('RPAREN')
+
+        # 处理AS子句
+        alias = None
+        if reader.peek() == 'AS':
+            reader.next()
+            alias = reader.match('IDENTIFIER')[1]
+
+        return {'name': func_name, 'arg': arg, 'alias': alias}
 
     def parse_delete():
         """解析DELETE FROM语句"""
@@ -354,8 +424,41 @@ def sql_parser(tokens):
         where_clause = None
         if reader.peek() == 'WHERE':
             reader.next()  # 吃掉 WHERE
-            where_clause = parse_expression()
+            where_clause = parse_where_expression()
+            #where_clause = parse_expression()
         return {'type': 'delete', 'table': table_name, 'where': where_clause}
+
+    def parse_update():
+        """UPDATE语句"""
+        table_name = reader.match('IDENTIFIER')[1]
+        reader.match('SET')
+
+        # 解析赋值列表
+        assignments = []
+        while reader.peek() != 'WHERE' and reader.peek() != 'SEMI':
+            column = reader.match('IDENTIFIER')[1]
+            reader.match('EQ')
+            value = -1
+            if reader.peek() in ('NUMBER', 'STRING'):
+                value = reader.next()[1]
+            else:
+                _error(f"期望值，得到 {reader.peek()}")
+            assignments.append({'column': column, 'value': value})
+            if reader.peek() == 'COMMA':
+                reader.next()
+
+        # 解析WHERE子句
+        where_clause = None
+        if reader.peek() == 'WHERE':
+            reader.next()
+            where_clause = parse_where_expression()
+
+        return {
+            'type': 'update',
+            'table': table_name,
+            'assignments': assignments,
+            'where': where_clause
+        }
 
     return parser()  # 开始执行
 
@@ -367,21 +470,18 @@ def sql_parser(tokens):
 """测试"""
 
 sql = """
-    CREATE TABLE users (
-        id INT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        age INT
-    );
-
-    INSERT INTO users VALUES (1, "'John'", 30);
-
-    SELECT name, age FROM users WHERE age >= 25;
-    """
+    -- 测试所有语句类型
+    CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL);
+    INSERT INTO users VALUES (1, 'Alice');
+    SELECT DISTINCT name FROM users WHERE id > 0 ORDER BY name DESC LIMIT 10;
+    UPDATE users SET name = 'Bob' WHERE id = 1;
+    DELETE FROM users WHERE id = 1;
+"""
 
 test_tokens = sql_lexer(sql)
-test_ast = sql_parser(test_tokens)
-
 print(f"Token列表:\n{test_tokens}")
+
+test_ast = sql_parser(test_tokens)
 print("")
 print(f"AST:\n{test_ast}")
 
