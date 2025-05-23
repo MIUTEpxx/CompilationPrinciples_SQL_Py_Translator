@@ -1,3 +1,6 @@
+from PyQt5.QtCore import Qt, QRegExp, QTimer, pyqtSignal
+
+# ===== 词法分析器 =====
 # 读取器模式标志
 STR_READER = 0    # 字符流模式
 TOKEN_READER = 1  # Token列表模式
@@ -11,6 +14,7 @@ KEYWORDS = {
     'ASC', 'DESC', 'LIKE', 'IN', 'BETWEEN', 'LIMIT', 'COUNT', 'SUM',
     'AVG', 'MIN', 'MAX', 'GROUP', 'HAVING', 'UNIQUE'
 }
+KEYWORDS_AS_OPERATORS = {'LIKE', 'IN', 'BETWEEN'}  # 新增的关键字视为操作符
 # 操作符映射表
 OPERATORS = {
     '=': 'EQ', '<>': 'NEQ', '!=': 'NEQ', '<': 'LT', '<=': 'LTE',
@@ -92,8 +96,8 @@ def sql_lexer(input_str):
         while not reader.is_eof():
             c = reader.peek()
 
-            # 跳过空白字符
-            if c.isspace() or (reader.peek() == '-' and reader.peek(1) == '-'):  # 跳过空白符 或 "--"注释
+            # 跳过空白字符 或 注释符
+            if c.isspace() or (reader.peek() == '-' and reader.peek(1) == '-') or (reader.peek() == '/' and reader.peek(1) == '*') :  # 跳过空白符 或 "--"注释 或 "/**/" 注释
                 _skip_whitespace()
                 continue
 
@@ -131,6 +135,17 @@ def sql_lexer(input_str):
                 while reader.peek() not in ['\n', '\r', 'eof']:
                     reader.next()
                 continue
+            elif reader.peek() == '/':
+                reader.next()  # 跳过'/'
+                reader.next()  # 跳过'*'
+                while True:
+                    if reader.peek() == '*' and reader.peek(1) == '/' :
+                        reader.next()  # 跳过'*'
+                        reader.next()  # 跳过'/'
+                        break
+                    elif reader.peek() == 'eof':
+                        _error("非法注释: 未匹配到 '*/'")
+                    reader.next()
             else:
                 break
 
@@ -145,8 +160,11 @@ def sql_lexer(input_str):
 
         # 判断是否是关键字
         if upper_value in KEYWORDS:
-            tokens.append(mk_tk(upper_value, 'KEYWORD'))  # !!!
-            # tokens.append(('KEYWORD', upper_value))
+            if upper_value in KEYWORDS_AS_OPERATORS:
+                # 将LIKE等关键字作为操作符处理
+                tokens.append(mk_tk(upper_value,'OPERATOR'))  # 标记类型为OPERATOR，值为LIKE
+            else:
+                tokens.append(mk_tk(upper_value, 'KEYWORD'))
         else:
             tokens.append(mk_tk('IDENTIFIER', value))
             # tokens.append(('IDENTIFIER', value))
@@ -355,6 +373,18 @@ def sql_parser(tokens):
             reader.next()
             where_clause = parse_where_expression()
 
+        # 解析GROUP BY子句（新增部分）
+        group_by = None
+        if reader.peek() == 'GROUP':
+            reader.next()  # 吃掉GROUP
+            reader.match('BY')  # 吃掉BY
+            group_by = []
+            while reader.peek() not in ('HAVING', 'ORDER', 'LIMIT', 'SEMI', 'eof'):
+                col = reader.match('IDENTIFIER')[1]
+                group_by.append(col)
+                if reader.peek() == 'COMMA':
+                    reader.next()
+
         # 解析ORDER BY子句
         order_by = None
         if reader.peek() == 'ORDER':
@@ -381,6 +411,7 @@ def sql_parser(tokens):
             'select': select_clause,
             'table': table_name,
             'where': where_clause,
+            'group_by': group_by,  # 新增group_by字段
             'order_by': order_by,
             'limit': limit
         }
@@ -400,13 +431,21 @@ def sql_parser(tokens):
     def parse_aggregate_function():
         """聚合函数解析"""
         func_name = reader.next()[0]
-        reader.match('LPAREN')
+        reader.match('LPAREN')   # 吃掉 (
+
+        # 处理可能存在的DISTINCT关键字
+        distinct = False
+        if reader.peek() == 'DISTINCT':
+            reader.next()  # 吃掉DISTINCT
+            distinct = True
+
+        # 解析参数（列名或*）
         if reader.peek() == 'ASTERISK':
             arg = '*'
             reader.next()
         else:
             arg = reader.match('IDENTIFIER')[1]
-        reader.match('RPAREN')
+        reader.match('RPAREN')   # 吃掉 )
 
         # 处理AS子句
         alias = None
@@ -414,7 +453,12 @@ def sql_parser(tokens):
             reader.next()
             alias = reader.match('IDENTIFIER')[1]
 
-        return {'name': func_name, 'arg': arg, 'alias': alias}
+        return {
+            'name': func_name,
+            'arg': arg,
+            'alias': alias,
+            'distinct': distinct  # 添加distinct字段
+        }
 
     def parse_delete():
         """解析DELETE FROM语句"""
@@ -464,7 +508,523 @@ def sql_parser(tokens):
 
 
 
+# ===== 数据库解释器 =====
+class Database:
+    def __init__(self):
+        self.tables = {}  # 表结构存储
+        self.current_db = "main"  # 支持多数据库扩展
 
+    def execute(self, ast):
+        # 解释器执行入口
+        results = []
+        for statement in ast:  # 支持批量执行多个SQL语句
+            try:
+                # 根据AST类型分发处理
+                if statement['type'] == 'create_table':
+                    self._create_table(statement)
+                    results.append("表创建成功")
+                elif statement['type'] == 'insert':
+                    self._insert(statement)
+                    results.append("插入成功")
+                elif statement['type'] == 'select':
+                    result = self._select(statement)
+                    results.append(('select', result))
+                elif statement['type'] == 'delete':
+                    self._delete(statement)
+                    results.append("删除成功")
+                elif statement['type'] == 'update':
+                    self._update(statement)
+                    results.append("更新成功")
+                else:
+                    raise Exception(f"不支持的语句类型: {statement['type']}")
+            except Exception as e:
+                results.append(('error', str(e)))
+        return results
+
+    def _create_table(self, statement):
+        """
+        表创建实现
+        支持INT/VARCHAR数据类型
+        处理PRIMARY KEY/NOT NULL/UNIQUE约束
+        列级数据校验规则存储
+        :param statement: 语句create_table的语法树节点
+        """
+        table_name = statement['name']
+        # 确保表名唯一
+        if table_name in self.tables:
+            raise Exception(f"表 '{table_name}' 已存在")
+
+        # 初始化表的数据结构，包含列定义、主键信息和数据存储
+        table = {
+            'columns': {},
+            'primary_key': None,
+            'data': []
+        }
+        # 遍历语句中的每个列，提取列名、数据类型和约束
+        for column in statement['columns']:
+            col_name = column['name']
+            col_type = column['type']
+            constraints = column['constraints']  # 约束：如 PRIMARY KEY、NOT NULL、UNIQUE，存储在列表中。
+
+            table['columns'][col_name] = {
+                'type': col_type,
+                'constraints': constraints
+            }
+            # 处理主键约束
+            if 'PRIMARY KEY' in constraints:
+                if table['primary_key'] is not None:
+                    raise Exception(f"表 '{table_name}' 只能有一个主键")
+                table['primary_key'] = col_name  # 记录此表的主键
+
+        self.tables[table_name] = table  # 保存表
+
+    def _insert(self, statement):
+        """
+        处理 INSERT 语句，将数据插入数据库表中，包含以下关键步骤
+        """
+        # 从 AST 中提取表名和插入值列表
+        table_name = statement['table']
+        values = statement['values']
+
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+
+        table = self.tables[table_name]  # 获取对应表信息
+        columns = list(table['columns'].keys())  # 获取表中各列名称(关键字)
+        if len(values) != len(columns):  # 确保插入值的数量与表的列数严格一致
+            raise Exception(f"插入的值数量({len(values)})与表 '{table_name}' 的列数({len(columns)})不匹配")
+
+        # 按列顺序构建数据行
+        row = {}
+        for i, value in enumerate(values):
+            col_name = columns[i]  # 列名
+            col_def = table['columns'][col_name]  # 此列的数据类型, 约束
+
+            # 类型检查
+            if 'INT' in col_def['type'] and not isinstance(value, int):
+                try:
+                    value = int(value)
+                except:
+                    raise Exception(f"列 '{col_name}' 要求整数类型，得到 '{type(value).__name__}'")
+
+            # 非空检查
+            if 'NOT NULL' in col_def['constraints'] and value is None:
+                raise Exception(f"列 '{col_name}' 不能为NULL")
+
+            # 主键唯一性检查
+            if col_name == table['primary_key'] and value in [r[col_name] for r in table['data']]:
+                raise Exception(f"主键 '{col_name}' 的值必须唯一")
+
+            # UNIQUE约束检查
+            if 'UNIQUE' in col_def['constraints'] and value in [r[col_name] for r in table['data']]:
+                raise Exception(f"列 '{col_name}' 的值必须唯一")
+
+            row[col_name] = value
+
+        table['data'].append(row)
+
+    def _select(self, statement):
+        """
+        SELECT 查找语句实现
+        """
+        # 参数提取
+        table_name = statement['table']  # 要查找的表名
+        select_clause = statement['select']   # SELECT子句
+        where_clause = statement['where']  # WHERE条件
+        order_by = statement['order_by']
+        group_by = statement.get('group_by', []) or []  # 强制保证是列表类型
+        limit = statement['limit']
+
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        # 获取表结构和列名 第一步：from语句，选择要操作的表
+        table = self.tables[table_name]
+        columns = list(table['columns'].keys())
+
+        # WHERE 条件过滤数据行 第二步：where语句，在from后的表中设置筛选条件，筛选出符合条件的记录。
+        filtered_rows = table['data']
+        if where_clause:
+            filtered_rows = self._filter_rows(table, filtered_rows, where_clause)
+
+        # 分组处理逻辑  第三步：group by语句，把筛选出的记录进行分组 顺序不对
+        grouped_data = {}
+        if group_by:
+            # 按分组键建立字典
+            for row in filtered_rows:
+                key = tuple(row[col] for col in group_by)
+                if key not in grouped_data:
+                    grouped_data[key] = []
+                grouped_data[key].append(row)
+        else:
+            # 无分组时视为一个组
+            grouped_data[()] = filtered_rows
+
+        # 第四步：处理 SELECT 列（包含聚合函数）
+        result = []
+        for group_key, group_rows in grouped_data.items():
+            result_row = {}
+
+            # 添加分组列
+            for i, col_name in enumerate(group_by):
+                result_row[col_name] = group_key[i]
+
+            # 处理SELECT中的每个列（包含聚合）
+            for col in select_clause['columns']:
+                if isinstance(col, dict) and 'name' in col and col['name'] in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):
+                    # 处理聚合函数
+                    agg_result = self._apply_aggregate_functions(table, group_rows, [col])
+                    result_row.update(agg_result[0])
+                else:
+                    # 处理普通列（必须是分组列）
+                    col_name = col['name'] if isinstance(col, dict) else col
+                    if col_name == '*':
+                        result_row.update(group_rows[0])
+                    else:
+                        result_row[col_name] = group_rows[0][col_name]
+
+            result.append(result_row)
+
+        # 第五步：处理DISTINCT
+        if select_clause['distinct']:
+            seen = set()
+            unique_result = []
+            for row in result:
+                row_tuple = tuple(sorted((k, v) for k, v in row.items() if k in select_clause['columns']))
+                if row_tuple not in seen:
+                    seen.add(row_tuple)
+                    unique_result.append(row)
+            result = unique_result
+
+
+        #  ORDER BY排序  第六步：order by语句：将select后的结果集按照顺序展示出来 顺序不对
+        if order_by:
+            # 判断是否有DESC排序（当前逻辑错误：只要有一个DESC就整体逆序）
+            reverse_flag = any(order['direction'] == 'DESC' for order in order_by)
+            # 排序键为所有排序字段的值
+            result = sorted(result,
+                            key=lambda x: [x[order['column']] for order in order_by],
+                            reverse=reverse_flag)
+
+            # 逻辑错误：只要有一个DESC就整体逆序
+            # result = sorted(result, key=lambda x: [
+            #     x[order['column']] for order in order_by
+            # ], reverse=any(order['direction'] == 'DESC' for order in order_by))
+
+
+        #  LIMIT限制结果数量  # 第七步：LIMIT 限制
+        if limit is not None:
+            result = result[:limit]
+
+        return result
+
+    def _apply_aggregate_functions(self, table, rows, columns):
+        """处理聚合函数（如 COUNT、SUM、AVG DISTINCT等）"""
+        result = [{}]  # 初始化结果集（每个聚合函数一个结果行）
+
+        # 遍历所有选择列（可能是普通列或聚合函数）
+        for col in columns:
+            # 检查是否为聚合函数（COUNT/SUM/AVG/MIN/MAX）
+            if isinstance(col, dict) and 'name' in col and col['name'] in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):
+                func = col
+                distinct = func.get('distinct', False)
+                func_name = col['name']  # 获取函数名（如COUNT）
+                arg = col['arg']    # 获取参数（如* 或列名）
+                alias = col.get('alias', f"{func_name}({arg})")  # 获取或生成别名 AS xxx
+
+                # 处理DISTINCT：对数据进行去重
+                distinct_values = []
+                if distinct:
+                    seen = set()
+                    for row in rows:
+                        val = row.get(arg)
+                        if val is None:
+                            continue
+                        if val not in seen:
+                            seen.add(val)
+                            distinct_values.append(val)
+                    data_source = distinct_values
+                else:
+                    data_source = [row.get(arg) for row in rows if arg in row]
+
+                # 处理COUNT函数
+                if func_name == 'COUNT':
+                    if arg == '*':   # COUNT(*)
+                        result[0][alias] = len(rows) if not distinct else len(distinct_values) # 直接计算行数
+                    else:  # COUNT(列名)
+                        # 统计非空值的数量
+                        count = sum(1 for v in data_source if v is not None)
+                        result[0][alias] = count
+
+                # 处理SUM/AVG/MIN/MAX函数
+                elif func_name in ('SUM', 'AVG', 'MIN', 'MAX'):
+                    # 验证列是否存在
+                    values = []
+                    for row in rows:
+                        val = row.get(arg)
+                        if isinstance(val, (int, float)):
+                            values.append(val)
+
+                    if not values:
+                        result[0][alias] = None
+                        continue
+
+                    if func_name == 'SUM':
+                        result[0][alias] = sum(values)
+                    elif func_name == 'AVG':
+                        result[0][alias] = sum(values) / len(values)
+                    elif func_name == 'MIN':
+                        result[0][alias] = min(values)
+                    elif func_name == 'MAX':
+                        result[0][alias] = max(values)
+
+            # # 处理普通列（在存在聚合函数时简化处理，通常应为GROUP BY列）
+            # else:
+            #     # 处理普通列选择（注:在聚合查询中通常不允许，但本项目进行简化实现）
+            #     if isinstance(col, dict) and 'name' in col:
+            #         col_name = col['name']  # 原始列名
+            #         alias = col.get('alias', col_name)  # 别名处理
+            #         # 取第一行的值（假设已分组）
+            #         result[0][alias] = rows[0][col_name] if rows else None
+            #     else:
+            #         # 直接取列值（可能不符合SQL标准）
+            #         result[0][col] = rows[0][col] if rows else None
+
+        return result
+
+    def _filter_rows(self, table, rows, where_clause):
+        if len(where_clause) != 3:
+            raise Exception("WHERE子句格式不正确，只支持简单的比较表达式")
+
+        left, op, right = where_clause
+
+        def process_value(value):
+            if isinstance(value, str):
+                return value
+            elif isinstance(value, int):
+                return value
+            elif isinstance(value, list) and value[0] == 'NUMBER':
+                return int(value[1])
+            elif isinstance(value, list) and value[0] == 'STRING':
+                return value[1]
+            else:
+                return value
+
+        right_val = process_value(right)
+
+        filtered = []
+        for row in rows:
+            if left not in row:
+                continue
+
+            left_val = row[left]
+
+            if op == 'EQ':
+                match = left_val == right_val
+            elif op == 'NEQ':
+                match = left_val != right_val
+            elif op == 'LT':
+                match = left_val < right_val
+            elif op == 'LTE':
+                match = left_val <= right_val
+            elif op == 'GT':
+                match = left_val > right_val
+            elif op == 'GTE':
+                match = left_val >= right_val
+            elif op == 'LIKE':
+                import re
+                # 将SQL的LIKE模式转换为正则表达式
+                pattern = re.escape(str(right_val)).replace('%', '.*').replace('_', '.')
+                regex = re.compile(f'^{pattern}$', re.IGNORECASE)
+                match = regex.match(str(left_val)) is not None
+            else:
+                raise Exception(f"不支持的操作符: {op}")
+
+            if match:
+                filtered.append(row)
+
+        return filtered
+
+    def _delete(self, statement):
+        table_name = statement['table']
+        where_clause = statement['where']
+
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        table = self.tables[table_name]
+
+        if not where_clause:
+            table['data'] = []
+            return
+
+        rows_to_delete = self._filter_rows(table, table['data'], where_clause)
+        table['data'] = [row for row in table['data'] if row not in rows_to_delete]
+
+    def _update(self, statement):
+        table_name = statement['table']
+        assignments = statement['assignments']
+        where_clause = statement['where']
+
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        table = self.tables[table_name]
+        columns = list(table['columns'].keys())
+
+        # 验证所有要更新的列都存在
+        for assignment in assignments:
+            col_name = assignment['column']
+            if col_name not in columns:
+                raise Exception(f"列 '{col_name}' 不存在于表 '{table_name}' 中")
+
+        # 确定要更新的行
+        rows_to_update = table['data']
+        if where_clause:
+            rows_to_update = self._filter_rows(table, rows_to_update, where_clause)
+
+        # 更新行
+        for row in rows_to_update:
+            for assignment in assignments:
+                col_name = assignment['column']
+                new_value = assignment['value']
+
+                # 类型检查
+                col_def = table['columns'][col_name]
+                if 'INT' in col_def['type'] and not isinstance(new_value, int):
+                    try:
+                        new_value = int(new_value)
+                    except:
+                        raise Exception(f"列 '{col_name}' 要求整数类型，得到 '{type(new_value).__name__}'")
+
+                # 非空检查
+                if 'NOT NULL' in col_def['constraints'] and new_value is None:
+                    raise Exception(f"列 '{col_name}' 不能为NULL")
+
+                # 主键唯一性检查（如果更新主键）
+                if col_name == table['primary_key']:
+                    if new_value in [r[col_name] for r in table['data'] if r is not row]:
+                        raise Exception(f"更新后的主键值 '{new_value}' 已存在")
+
+                # UNIQUE约束检查
+                if 'UNIQUE' in col_def['constraints']:
+                    if new_value in [r[col_name] for r in table['data'] if r is not row]:
+                        raise Exception(f"更新后的列 '{col_name}' 值必须唯一")
+
+                row[col_name] = new_value
+
+    def get_table_data(self, table_name, limit=100):
+        """获取表中的数据"""
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        table = self.tables[table_name]
+        return table['data'][:limit]
+
+    def insert_row(self, table_name, values):
+        """插入新行"""
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        table = self.tables[table_name]
+        columns = list(table['columns'].keys())
+
+        if len(values) != len(columns):
+            raise Exception(f"插入的值数量({len(values)})与表 '{table_name}' 的列数({len(columns)})不匹配")
+
+        row = {}
+        for i, value in enumerate(values):
+            col_name = columns[i]
+            col_def = table['columns'][col_name]
+
+            # 类型检查
+            if 'INT' in col_def['type'] and value != '':
+                try:
+                    value = int(value)
+                except:
+                    raise Exception(f"列 '{col_name}' 要求整数类型，得到 '{type(value).__name__}'")
+
+            # 非空检查
+            if 'NOT NULL' in col_def['constraints'] and (value is None or value == ''):
+                raise Exception(f"列 '{col_name}' 不能为NULL")
+
+            # 主键唯一性检查
+            if col_name == table['primary_key'] and value in [r[col_name] for r in table['data']]:
+                raise Exception(f"主键 '{col_name}' 的值必须唯一")
+
+            # UNIQUE约束检查
+            if 'UNIQUE' in col_def['constraints'] and value in [r[col_name] for r in table['data']]:
+                raise Exception(f"列 '{col_name}' 的值必须唯一")
+
+            row[col_name] = value if value != '' else None
+
+        table['data'].append(row)
+        return row
+
+    def update_row(self, table_name, primary_key_value, updates):
+        """更新行"""
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        table = self.tables[table_name]
+        primary_key = table['primary_key']
+
+        if not primary_key:
+            raise Exception(f"表 '{table_name}' 没有主键，无法更新")
+
+        for row in table['data']:
+            if row[primary_key] == primary_key_value:
+                for col_name, value in updates.items():
+                    if col_name not in table['columns']:
+                        raise Exception(f"列 '{col_name}' 不存在于表 '{table_name}' 中")
+
+                    col_def = table['columns'][col_name]
+
+                    # 类型检查
+                    if 'INT' in col_def['type'] and value != '':
+                        try:
+                            value = int(value)
+                        except:
+                            raise Exception(f"列 '{col_name}' 要求整数类型，得到 '{type(value).__name__}'")
+
+                    # 非空检查
+                    if 'NOT NULL' in col_def['constraints'] and (value is None or value == ''):
+                        raise Exception(f"列 '{col_name}' 不能为NULL")
+
+                    # 主键唯一性检查
+                    if col_name == primary_key and value != primary_key_value:
+                        if value in [r[primary_key] for r in table['data'] if r[primary_key] != primary_key_value]:
+                            raise Exception(f"更新后的主键值 '{value}' 已存在")
+
+                    # UNIQUE约束检查
+                    if 'UNIQUE' in col_def['constraints'] and value != row[col_name]:
+                        if value in [r[col_name] for r in table['data'] if r[primary_key] != primary_key_value]:
+                            raise Exception(f"更新后的列 '{col_name}' 值必须唯一")
+
+                    row[col_name] = value if value != '' else None
+                return True
+
+        raise Exception(f"找不到主键值为 '{primary_key_value}' 的行")
+
+    def delete_row(self, table_name, primary_key_value):
+        """删除行"""
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+
+        table = self.tables[table_name]
+        primary_key = table['primary_key']
+
+        if not primary_key:
+            raise Exception(f"表 '{table_name}' 没有主键，无法删除")
+
+        original_len = len(table['data'])
+        table['data'] = [row for row in table['data'] if row[primary_key] != primary_key_value]
+
+        if len(table['data']) == original_len:
+            raise Exception(f"找不到主键值为 '{primary_key_value}' 的行")
+
+        return True
 
 
 """测试"""
@@ -486,6 +1046,12 @@ print("")
 print(f"AST:\n{test_ast}")
 
 
-# for token in test_tokens:
-#     print(f"{token[0]:<12} | {token[1]}")
+"""
 
+age | id | name     | email                 |     
+28  | 1  | Alice    | alice@example.com     |   
+30  | 2  | Bob      | bob@example.com       |   
+35  | 3  | Charlie  | charlie@example.com   |   
+
+
+"""
