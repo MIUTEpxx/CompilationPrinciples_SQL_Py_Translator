@@ -12,7 +12,7 @@ KEYWORDS = {
     'VALUES', 'DELETE', 'UPDATE', 'SET', 'INT', 'VARCHAR', 'PRIMARY',
     'KEY', 'NOT', 'NULL', 'AND', 'OR', 'AS', 'DISTINCT', 'ORDER', 'BY',
     'ASC', 'DESC', 'LIKE', 'IN', 'BETWEEN', 'LIMIT', 'COUNT', 'SUM',
-    'AVG', 'MIN', 'MAX', 'GROUP', 'HAVING', 'UNIQUE'
+    'AVG', 'MIN', 'MAX', 'GROUP', 'HAVING', 'UNIQUE', 'DROP'
 }
 KEYWORDS_AS_OPERATORS = {'LIKE', 'IN', 'BETWEEN'}  # 新增的关键字视为操作符
 # 操作符映射表
@@ -257,6 +257,8 @@ def sql_parser(tokens):
                     statements.append(parse_delete())
                 elif keyword == 'UPDATE':
                     statements.append(parse_update())
+                elif keyword == 'DROP':
+                    statements.append(parse_drop())
                 else:
                     _error(f"未实现的语句类型: {keyword}")
             reader.match('SEMI')  # 吃掉语句结束符 ;
@@ -300,7 +302,7 @@ def sql_parser(tokens):
                     reader.match('NULL')  # 吃掉 NULL
                     constraints.append('NOT NULL')
                 else:
-                    constraints.append(reader.next()[1])
+                    constraints.append(reader.next()[0])
             # 添加到列定义
             columns.append({
                 'name': col_name,
@@ -504,6 +506,12 @@ def sql_parser(tokens):
             'where': where_clause
         }
 
+    def parse_drop():
+        """解析DROP TABLE语句"""
+        reader.match('TABLE')  # 吃掉 TABLE
+        table_name = reader.match('IDENTIFIER')[1]
+        return {'type': 'drop_table', 'name': table_name}
+
     return parser()  # 开始执行
 
 
@@ -535,6 +543,9 @@ class Database:
                 elif statement['type'] == 'update':
                     self._update(statement)
                     results.append("更新成功")
+                elif statement['type'] == 'drop_table':
+                    self._drop_table(statement)
+                    results.append("表删除成功")
                 else:
                     raise Exception(f"不支持的语句类型: {statement['type']}")
             except Exception as e:
@@ -779,18 +790,6 @@ class Database:
                     elif func_name == 'MAX':
                         result[0][alias] = max(values)
 
-            # # 处理普通列（在存在聚合函数时简化处理，通常应为GROUP BY列）
-            # else:
-            #     # 处理普通列选择（注:在聚合查询中通常不允许，但本项目进行简化实现）
-            #     if isinstance(col, dict) and 'name' in col:
-            #         col_name = col['name']  # 原始列名
-            #         alias = col.get('alias', col_name)  # 别名处理
-            #         # 取第一行的值（假设已分组）
-            #         result[0][alias] = rows[0][col_name] if rows else None
-            #     else:
-            #         # 直接取列值（可能不符合SQL标准）
-            #         result[0][col] = rows[0][col] if rows else None
-
         return result
 
     def _filter_rows(self, table, rows, where_clause):
@@ -847,6 +846,7 @@ class Database:
         return filtered
 
     def _delete(self, statement):
+        """DELETE语句"""
         table_name = statement['table']
         where_clause = statement['where']
 
@@ -973,6 +973,19 @@ class Database:
         if not primary_key:
             raise Exception(f"表 '{table_name}' 没有主键，无法更新")
 
+        # 获取主键列的数据类型
+        col_def = table['columns'][primary_key]
+        data_type = col_def['type']
+        # 根据数据类型转换主键值
+        try:
+            if 'INT' in data_type:
+                primary_key_value = int(primary_key_value)
+            elif 'VARCHAR' in data_type:
+                primary_key_value = str(primary_key_value)
+            # 可根据需要添加其他数据类型转换
+        except ValueError:
+            raise Exception(f"主键值 '{primary_key_value}' 无法转换为列 '{primary_key}' 的类型 {data_type}")
+
         for row in table['data']:
             if row[primary_key] == primary_key_value:
                 for col_name, value in updates.items():
@@ -1012,19 +1025,42 @@ class Database:
         if table_name not in self.tables:
             raise Exception(f"表 '{table_name}' 不存在")
 
+
         table = self.tables[table_name]
         primary_key = table['primary_key']
 
         if not primary_key:
             raise Exception(f"表 '{table_name}' 没有主键，无法删除")
 
+        # 获取主键列的数据类型
+        col_def = table['columns'][primary_key]
+        data_type = col_def['type']
+
+        # 根据数据类型转换主键值
+        try:
+            if 'INT' in data_type:
+                primary_key_value = int(primary_key_value)
+            elif 'VARCHAR' in data_type:
+                primary_key_value = str(primary_key_value)
+            # 可根据需要添加其他数据类型转换
+        except ValueError:
+            raise Exception(f"主键值 '{primary_key_value}' 无法转换为列 '{primary_key}' 的类型 {data_type}")
+
         original_len = len(table['data'])
+        # 过滤掉主键等于指定值的行
         table['data'] = [row for row in table['data'] if row[primary_key] != primary_key_value]
 
         if len(table['data']) == original_len:
             raise Exception(f"找不到主键值为 '{primary_key_value}' 的行")
 
         return True
+
+    def _drop_table(self, statement):
+        """表删除实现"""
+        table_name = statement['name']
+        if table_name not in self.tables:
+            raise Exception(f"表 '{table_name}' 不存在")
+        del self.tables[table_name]
 
 
 """测试"""
