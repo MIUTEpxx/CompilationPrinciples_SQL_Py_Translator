@@ -519,17 +519,15 @@ def sql_parser(tokens):
 
         # 解析赋值列表
         assignments = []
-        while reader.peek() != 'WHERE' and reader.peek() != 'SEMI':
+        while reader.peek() not in ('WHERE', 'SEMI', 'eof'):
             column = reader.match('IDENTIFIER')[1]
             reader.match('EQ')
-            value = -1
-            if reader.peek() in ('NUMBER', 'STRING'):
-                value = reader.next()[1]
-            else:
-                _error(f"期望值，得到 {reader.peek()}")
-            assignments.append({'column': column, 'value': value})
+            expr = parse_expression()  # 解析表达式
+            assignments.append({'column': column, 'expr': expr})
             if reader.peek() == 'COMMA':
-                reader.next()
+                reader.next()  # 跳过逗号
+            else:
+                break  # 无逗号则结束
 
         # 解析WHERE子句
         where_clause = None
@@ -658,7 +656,7 @@ class SQLInterpreter:
                     raise Exception(f"列 '{col_name}' 要求整数类型，得到 '{type(value).__name__}'")
 
             # 非空检查
-            if 'NOT NULL' in col_def['constraints'] and value is None:
+            if 'NOT NULL' in col_def['constraints'] and value is None or value == '':
                 raise Exception(f"列 '{col_name}' 不能为NULL")
 
             # 主键唯一性检查
@@ -997,13 +995,16 @@ class SQLInterpreter:
             raise Exception(f"表 '{table_name}' 不存在")
 
         table = self.tables[table_name]
-
+        old_len = len(table)
         if not where_clause:
             table['data'] = []
             return
 
         rows_to_delete = self._filter_rows(table, table['data'], where_clause)
         table['data'] = [row for row in table['data'] if row not in rows_to_delete]
+
+        if old_len == len(table):
+            raise Exception(f"删除失败, 未找到符合的记录 ")
 
     def _update(self, statement):
         table_name = statement['table']
@@ -1026,15 +1027,18 @@ class SQLInterpreter:
         rows_to_update = table['data']
         if where_clause:
             rows_to_update = self._filter_rows(table, rows_to_update, where_clause)
+            if len(rows_to_update) == 0:
+                raise Exception(f"更新失败, 未找到符合的记录 ")
 
         # 更新行
         for row in rows_to_update:
             for assignment in assignments:
                 col_name = assignment['column']
-                new_value = assignment['value']
+                expr = assignment['expr']
+                new_value = self.evaluate_expression(row, expr)
+                col_def = table['columns'][col_name]
 
                 # 类型检查
-                col_def = table['columns'][col_name]
                 if 'INT' in col_def['type'] and not isinstance(new_value, int):
                     try:
                         new_value = int(new_value)
@@ -1056,6 +1060,51 @@ class SQLInterpreter:
                         raise Exception(f"更新后的列 '{col_name}' 值必须唯一")
 
                 row[col_name] = new_value
+
+    def evaluate_expression(self, row, expr):
+        """计算表达式值，支持基本二元运算"""
+        if len(expr) == 1:
+            # 单个操作数（列名、数值或字符串）
+            token = expr[0]
+            if isinstance(token, (int, float)):
+                return token
+            elif isinstance(token, str):
+                return row.get(token, token)  # 列名或字符串
+            else:
+                raise Exception(f"无效的表达式token: {token}")
+        elif len(expr) == 3:
+            # 二元运算（例如：age + 1）
+            left, op, right = expr
+            left_val = self._get_operand_value(row, left)
+            right_val = self._get_operand_value(row, right)
+            return self._apply_operator(op, left_val, right_val)
+        else:
+            raise Exception("暂不支持复杂表达式")
+
+    def _get_operand_value(self, row, operand):
+        """获取操作数值（列值或字面量）"""
+        if isinstance(operand, (int, float)):
+            return operand
+        elif isinstance(operand, str):
+            return row.get(operand, operand)  # 列名或字符串字面量
+        else:
+            raise Exception(f"无效的操作数: {operand}")
+
+    def _apply_operator(self, op, a, b):
+        """应用运算符"""
+        if op == 'PLUS':
+            return a + b
+        elif op == 'MINUS':
+            return a - b
+        elif op == 'ASTERISK':
+            return a * b
+        elif op == 'SLASH':
+            if b == 0:
+                raise Exception("除数不能为零")
+            return a / b
+        else:
+            raise Exception(f"不支持的运算符: {op}")
+
 
     def get_table_data(self, table_name, limit=100):
         """获取表中的数据"""

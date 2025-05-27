@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QFont, QColor, QIcon, QSyntaxHighlighter, QTextCharFormat, QBrush
 from PyQt5.QtCore import Qt, QRegExp, QTimer, pyqtSignal
 
-from sql_processor import Database, sql_lexer, sql_parser
+from sql_processor import SQLInterpreter, sql_lexer, sql_parser
 
 
 # ===== SQL语法高亮 =====
@@ -58,7 +58,7 @@ class SQLHighlighter(QSyntaxHighlighter):
             'EXISTS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IS', 'NULL', 'NOT',
             'DEFAULT', 'CHECK', 'REFERENCES', 'FOREIGN', 'PRIVILEGES', 'GRANT',
             'REVOKE', 'TRUNCATE', 'COMMENT', 'USE', 'DATABASE', 'SHOW', 'TABLES',
-            'DESCRIBE', 'EXPLAIN', 'ANALYZE', 'OPTIMIZE', 'BACKUP', 'RESTORE'
+            'DESCRIBE', 'EXPLAIN', 'ANALYZE', 'OPTIMIZE', 'BACKUP', 'RESTORE',
         ]
         for keyword in keywords:
             pattern = QRegExp(rf'\b{keyword}\b', Qt.CaseInsensitive)
@@ -68,7 +68,7 @@ class SQLHighlighter(QSyntaxHighlighter):
         functions = [
             'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CONCAT', 'SUBSTRING', 'LENGTH',
             'UPPER', 'LOWER', 'TRIM', 'REPLACE', 'ROUND', 'CEIL', 'FLOOR', 'NOW',
-            'DATE', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE',            'SECOND', 'DATEDIFF', 'TIMESTAMPDIFF', 'IFNULL', 'COALESCE', 'NULLIF',
+            'DATE', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE','SECOND', 'DATEDIFF', 'TIMESTAMPDIFF', 'IFNULL', 'COALESCE', 'NULLIF',
             'IF', 'CASE', 'EXTRACT', 'CAST', 'CONVERT', 'GROUP_CONCAT', 'RAND',
             'SHA1', 'MD5', 'LEFT', 'RIGHT', 'POSITION', 'FORMAT', 'STR_TO_DATE',
             'DATE_FORMAT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP'
@@ -447,7 +447,7 @@ class AdvancedSQLInterpreterGUI(QMainWindow):
         self.setWindowTitle("高级SQL解释器")
         self.setGeometry(100, 100, 1200, 800)
 
-        self.db = Database()
+        self.db = SQLInterpreter()
         self.init_ui()
 
     def init_ui(self):
