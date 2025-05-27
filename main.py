@@ -244,9 +244,12 @@ class EditTableDialog(QDialog):
                 # 使用主键作为键
                 primary_key_value = row[primary_key]
                 if primary_key_value:
+                    if primary_key_value in current_data:  # 检查是否发生主键冲突
+                        QMessageBox.warning(self, "错误修改", f"主键 '{primary_key_value}' 的记录已存在! 发生主键冲突!")
+                        return
                     current_data[primary_key_value] = row
 
-            # 找出已删除的行
+            # 找出已删除的行(或已经修改主键值的行)
             original_pks = {str(row[primary_key]): row for row in self.table_data if primary_key in row}
             deleted_pks = [pk for pk in original_pks if pk not in current_data]
 
@@ -254,7 +257,7 @@ class EditTableDialog(QDialog):
             for pk in deleted_pks:
                 self.db.delete_row(self.table_name, pk)
 
-            # 处理更新和新增
+            # 处理列更新和新增
             for pk, row in current_data.items():
                 if pk in original_pks:
                     # 更新行
@@ -263,9 +266,9 @@ class EditTableDialog(QDialog):
 
                     for col_name, value in row.items():
                         if str(original_row.get(col_name, "")) != value:
-                            updates[col_name] = value
+                            updates[col_name] = value  # 若有不一致的列数据, 则更新此记录的列信息, 更新为用户输入的数据
 
-                    if updates:
+                    if updates:  # 更新!
                         self.db.update_row(self.table_name, pk, updates)
                 else:
                     # 新增行
@@ -347,71 +350,74 @@ class TableStructureDialog(QDialog):
 class TableDataPreviewDialog(QDialog):
     def __init__(self, table_name, table_data, db, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"表数据预览: {table_name}")
+        self.data_table = None
+        self.table_name = table_name
+        self.db = db
+        self._init_base_ui()  # 初始化基础布局
+        self.refresh_data()  # 初始化加载数据
         self.setMinimumSize(800, 600)
 
-        self.table_name = table_name
-        self.table_data = table_data
-        self.db = db
+    def _init_base_ui(self):
+        """初始化基础布局（只创建一次）"""
+        layout = QVBoxLayout()
+        self.data_group = QGroupBox()
+        self.data_layout = QVBoxLayout()
+        self.data_group.setLayout(self.data_layout)
+        layout.addWidget(self.data_group)
 
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-
-        # 创建分组框显示表数据
-        data_group = QGroupBox(f"表数据 ({len(self.table_data)} 条记录)")
-        data_layout = QVBoxLayout()
-
-        # 表格视图
-        self.data_table = QTableWidget()
-
-        if self.table_data:
-            # 获取列名
-            columns = list(self.table_data[0].keys())
-            self.data_table.setColumnCount(len(columns))
-            self.data_table.setHorizontalHeaderLabels(columns)
-
-            # 填充数据
-            self.data_table.setRowCount(len(self.table_data))
-            for row_idx, row_data in enumerate(self.table_data):
-                for col_idx, col_name in enumerate(columns):
-                    item = QTableWidgetItem(str(row_data.get(col_name, "")))
-                    self.data_table.setItem(row_idx, col_idx, item)
-
-            # 调整列宽
-            self.data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-            self.data_table.horizontalHeader().setStretchLastSection(True)
-
-            # 启用排序
-            self.data_table.setSortingEnabled(True)
-
-        else:
-            self.data_table.setColumnCount(1)
-            self.data_table.setHorizontalHeaderLabels(["信息"])
-            self.data_table.setRowCount(1)
-            self.data_table.setItem(0, 0, QTableWidgetItem("表中没有数据"))
-
-        data_layout.addWidget(self.data_table)
-        data_group.setLayout(data_layout)
-        layout.addWidget(data_group)
-
-        # 按钮区域
         btn_layout = QHBoxLayout()
-
-        self.edit_data_btn = QPushButton("编辑数据")
-        self.edit_data_btn.clicked.connect(self.edit_data)
-        btn_layout.addWidget(self.edit_data_btn)
-
+        self.edit_btn = QPushButton("编辑数据")
         self.refresh_btn = QPushButton("刷新")
-        self.refresh_btn.clicked.connect(self.refresh_data)
-        btn_layout.addWidget(self.refresh_btn)
-
         self.close_btn = QPushButton("关闭")
-        self.close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(self.edit_btn)
+        btn_layout.addWidget(self.refresh_btn)
         btn_layout.addWidget(self.close_btn)
-
         layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+        self.edit_btn.clicked.connect(self.edit_data)
+        self.refresh_btn.clicked.connect(self.refresh_data)
+        self.close_btn.clicked.connect(self.close)
+
+    def _init_table(self):
+        """初始化表格控件（可重用）"""
+        if self.data_table:
+            self.data_table.deleteLater()
+        self.data_table = QTableWidget()
+        self.data_layout.addWidget(self.data_table)
+        self.data_table.setSortingEnabled(True)
+
+    def update_table(self):
+        """核心数据更新方法"""
+        self._init_table()  # 重建表格控件
+        table_data = self.table_data
+        if not table_data:
+            self._show_empty_state()
+            return
+
+        # 更新表格结构
+        columns = list(table_data[0].keys())
+        self.data_table.setColumnCount(len(columns))
+        self.data_table.setHorizontalHeaderLabels(columns)
+        self.data_table.setRowCount(len(table_data))
+
+        # 填充数据
+        for row_idx, row in enumerate(table_data):
+            for col_idx, col in enumerate(columns):
+                item = QTableWidgetItem(str(row.get(col, "")))
+                self.data_table.setItem(row_idx, col_idx, item)
+
+        # 保持原有交互状态
+        self.data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.data_table.horizontalHeader().setStretchLastSection(True)
+
+    def refresh_data(self):
+        """优化后的刷新逻辑"""
+        try:
+            self.table_data = self.db.get_table_data(self.table_name)
+            self.update_table()  # 仅更新表格内容
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"刷新失败: {str(e)}")
 
     def edit_data(self):
         if not self.table_data:
@@ -426,13 +432,12 @@ class TableDataPreviewDialog(QDialog):
         if edit_dialog.exec_():
             self.refresh_data()
 
-    def refresh_data(self):
-        try:
-            # 重新获取表数据
-            self.table_data = self.db.get_table_data(self.table_name)
-            self.init_ui()  # 重新初始化UI以更新数据
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"刷新数据失败: {str(e)}")
+    def _show_empty_state(self):
+        """空数据状态处理"""
+        self.data_table.setColumnCount(1)
+        self.data_table.setHorizontalHeaderLabels(["信息"])
+        self.data_table.setRowCount(1)
+        self.data_table.setItem(0, 0, QTableWidgetItem("表中没有数据"))
 
 
 # ===== 增强版SQL解释器图形界面 =====
@@ -575,25 +580,34 @@ class AdvancedSQLInterpreterGUI(QMainWindow):
 
     def set_example_sql(self):
         example = """
+        /* 创建users表 */
         CREATE TABLE users (
-            id INT PRIMARY KEY,
-            name VARCHAR(50) NOT NULL,
-            age INT,
-            email VARCHAR(100) UNIQUE
+            id INT PRIMARY KEY,             -- id为整形主键
+            name VARCHAR(50) NOT NULL,      -- name为非空字符串, 长度为50
+            age INT,                        -- age为整形
+            email VARCHAR(100) UNIQUE       -- email为唯一的字符串, 长度为50
         );
-
+        
+        /* 插入数据 */
         INSERT INTO users VALUES (1, 'Alice', 28, 'alice@example.com');
         INSERT INTO users VALUES (2, 'Bob', 35, 'bob@example.com');
         INSERT INTO users VALUES (3, 'Charlie', 30, 'charlie@example.com');
-
+        
+        /* 查询 */
         SELECT * FROM users;
         SELECT id, name, age FROM users WHERE age > 30 ORDER BY age DESC;
-
+        
+        /* 更新 */
         UPDATE users SET email = 'alice.new@example.com' WHERE id = 1;
-
+        
+        /* 再次查询 */
         SELECT COUNT(*) AS total_users, AVG(age) AS avg_age FROM users;
-
+        
+        /* 删除记录 */
         DELETE FROM users WHERE age < 29;
+            
+        /* 删除users表 */
+        -- DROP TABLE users;
         """
         self.sql_edit.setPlainText(example)
 
