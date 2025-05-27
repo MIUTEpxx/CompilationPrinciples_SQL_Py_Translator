@@ -419,16 +419,54 @@ def sql_parser(tokens):
         }
 
     def parse_where_expression():
-        left = reader.match('IDENTIFIER')[1]
-        op = reader.match('OPERATOR')[0]
-        right = None
-        if reader.peek() in ('NUMBER', 'STRING'):
-            right = reader.next()[1]
-        elif reader.peek() == 'IDENTIFIER':
-            right = reader.next()[1]
+        """解析WHERE子句的复合条件"""
+        # left = reader.match('IDENTIFIER')[1]
+        # op = reader.match('OPERATOR')[0]
+        # right = None
+        # if reader.peek() in ('NUMBER', 'STRING'):
+        #     right = reader.next()[1]
+        # elif reader.peek() == 'IDENTIFIER':
+        #     right = reader.next()[1]
+        # else:
+        #     _error(f"期望值，得到 {reader.peek()}")
+        # return [left, op, right]
+        return parse_logical_expression()
+
+    def parse_logical_expression():
+        """解析由AND/OR连接的逻辑表达式"""
+        left = parse_primary_condition()
+        while reader.peek() in ('AND', 'OR'):
+            op = reader.next()[0]  # 获取逻辑运算符
+            right = parse_primary_condition()
+            left = {'logical_op': op, 'left': left, 'right': right}
+        return left
+
+    def parse_primary_condition():
+        """解析基础条件或括号内的表达式"""
+        if reader.peek() == 'LPAREN':
+            reader.next()  # 吃掉 '('
+            expr = parse_logical_expression()
+            reader.match('RPAREN')  # 吃掉 ')'
+            return expr
         else:
-            _error(f"期望值，得到 {reader.peek()}")
-        return [left, op, right]
+            # 解析列名、操作符和值
+            left = reader.match('IDENTIFIER')[1]
+            op_token = reader.current_val
+            right = -1
+            op = None
+            if op_token[1] == 'OPERATOR':
+                op = op_token[0]
+                reader.next()  # 吃掉操作符
+            else:
+                _error(f"期望操作符，得到 {op_token[0]}")
+            # 解析右值
+            if reader.peek() in ('NUMBER', 'STRING'):
+                right = reader.next()[1]
+            elif reader.peek() == 'IDENTIFIER':
+                right = reader.next()[1]
+            else:
+                _error(f"期望值或列名，得到 {reader.peek()}")
+            return {'left': left, 'op': op, 'right': right}
 
     def parse_aggregate_function():
         """聚合函数解析"""
@@ -516,8 +554,8 @@ def sql_parser(tokens):
 
 
 
-# ===== 数据库解释器 =====
-class Database:
+# ===== SQL解释器 =====
+class SQLInterpreter:
     def __init__(self):
         self.tables = {}  # 表结构存储
         self.current_db = "main"  # 支持多数据库扩展
@@ -661,6 +699,7 @@ class Database:
 
         # 分组处理逻辑  第三步：group by语句，把筛选出的记录进行分组 顺序不对
         grouped_data = {}
+        has_aggregate = False
         if group_by:
             # 按分组键建立字典
             for row in filtered_rows:
@@ -669,33 +708,76 @@ class Database:
                     grouped_data[key] = []
                 grouped_data[key].append(row)
         else:
-            # 无分组时视为一个组
-            grouped_data[()] = filtered_rows
+            # # 无分组时视为一个组
+            # grouped_data[()] = filtered_rows
+            # 新增：当没有GROUP BY时，检查是否包含聚合函数
+            has_aggregate = any(
+                isinstance(col, dict) and
+                col.get('name') in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX')
+                for col in select_clause['columns']
+            )
+
+            if has_aggregate:
+                # 有聚合函数时视为一个分组
+                grouped_data[()] = filtered_rows
+            else:
+                # 没有聚合函数时每行单独处理
+                for i, row in enumerate(filtered_rows):
+                    grouped_data[(i,)] = [row]  # 使用行索引作为唯一分组键
 
         # 第四步：处理 SELECT 列（包含聚合函数）
         result = []
         for group_key, group_rows in grouped_data.items():
-            result_row = {}
+            # 处理聚合函数列
+            agg_results = self._apply_aggregate_functions(
+                table,
+                group_rows,
+                [col for col in select_clause['columns']
+                 if isinstance(col, dict) and col.get('name') in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX')]
+            )
 
-            # 添加分组列
-            for i, col_name in enumerate(group_by):
-                result_row[col_name] = group_key[i]
+            # 构建结果行
+            if group_by or has_aggregate:
+                # 分组或聚合查询：每个分组生成一行
+                result_row = {}
+                # 添加分组列
+                for i, col in enumerate(group_by or []):
+                    result_row[col] = group_key[i]
+                # 添加聚合结果
+                if agg_results:
+                    result_row.update(agg_results[0])
+                # 添加普通列（仅当有分组时）
+                if not has_aggregate:
+                    for col in select_clause['columns']:
+                        # 处理通配符 *
+                        if col == '*':
+                            for column_name in columns:
+                                result_row.update(group_rows[0])
+                        else:
+                            if not isinstance(col, dict):
+                                col_name = col['name'] if isinstance(col, dict) else col
+                                result_row[col_name] = group_rows[0][col_name]
 
-            # 处理SELECT中的每个列（包含聚合）
-            for col in select_clause['columns']:
-                if isinstance(col, dict) and 'name' in col and col['name'] in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):
-                    # 处理聚合函数
-                    agg_result = self._apply_aggregate_functions(table, group_rows, [col])
-                    result_row.update(agg_result[0])
-                else:
-                    # 处理普通列（必须是分组列）
-                    col_name = col['name'] if isinstance(col, dict) else col
-                    if col_name == '*':
-                        result_row.update(group_rows[0])
-                    else:
-                        result_row[col_name] = group_rows[0][col_name]
-
-            result.append(result_row)
+                result.append(result_row)
+            else:
+                # 普通查询：每行单独输出
+                for row in group_rows:
+                    result_row = {}
+                    for col in select_clause['columns']:
+                        # 处理通配符 *
+                        if col == '*':
+                            for column_name in columns:
+                                result_row[column_name] = row[column_name]
+                        # 处理普通列或聚合函数
+                        else:
+                            if isinstance(col, dict):
+                                # 处理带别名的列或聚合函数
+                                col_name = col.get('alias', col['name'])
+                                result_row[col_name] = row[col['name']]
+                            else:
+                                # 普通列名
+                                result_row[col] = row[col]
+                    result.append(result_row)
 
         # 第五步：处理DISTINCT
         if select_clause['distinct']:
@@ -711,17 +793,18 @@ class Database:
 
         #  ORDER BY排序  第六步：order by语句：将select后的结果集按照顺序展示出来 顺序不对
         if order_by:
-            # 判断是否有DESC排序（当前逻辑错误：只要有一个DESC就整体逆序）
-            reverse_flag = any(order['direction'] == 'DESC' for order in order_by)
-            # 排序键为所有排序字段的值
-            result = sorted(result,
-                            key=lambda x: [x[order['column']] for order in order_by],
-                            reverse=reverse_flag)
+            # 获取所有排序字段的值（支持嵌套字段）
+            def get_sort_key(row):
+                keys = []
+                for order in order_by:
+                    value = row
+                    for part in order['column'].split('.'):
+                        value = value.get(part, None)
+                    keys.append(value)
+                return keys
 
-            # 逻辑错误：只要有一个DESC就整体逆序
-            # result = sorted(result, key=lambda x: [
-            #     x[order['column']] for order in order_by
-            # ], reverse=any(order['direction'] == 'DESC' for order in order_by))
+            reverse_flag = any(order['direction'] == 'DESC' for order in order_by)
+            result = sorted(result, key=get_sort_key, reverse=reverse_flag)
 
 
         #  LIMIT限制结果数量  # 第七步：LIMIT 限制
@@ -729,6 +812,14 @@ class Database:
             result = result[:limit]
 
         return result
+
+    def _contains_aggregate(self, select_clause):
+        """检查SELECT子句是否包含聚合函数"""
+        return any(
+            isinstance(col, dict) and
+            col.get('name') in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX')
+            for col in select_clause['columns']
+        )
 
     def _apply_aggregate_functions(self, table, rows, columns):
         """处理聚合函数（如 COUNT、SUM、AVG DISTINCT等）"""
@@ -792,58 +883,110 @@ class Database:
 
         return result
 
-    def _filter_rows(self, table, rows, where_clause):
-        if len(where_clause) != 3:
-            raise Exception("WHERE子句格式不正确，只支持简单的比较表达式")
+    def _filter_rows(self, table, rows, condition):
+        """根据条件表达式树过滤行"""
+        return [row for row in rows if self._evaluate_condition(row, condition, table)]
 
-        left, op, right = where_clause
-
-        def process_value(value):
-            if isinstance(value, str):
-                return value
-            elif isinstance(value, int):
-                return value
-            elif isinstance(value, list) and value[0] == 'NUMBER':
-                return int(value[1])
-            elif isinstance(value, list) and value[0] == 'STRING':
-                return value[1]
+    def _evaluate_condition(self, row, condition, table):
+        """递归评估条件表达式"""
+        if 'logical_op' in condition:
+            left = self._evaluate_condition(row, condition['left'], table)
+            right = self._evaluate_condition(row, condition['right'], table)
+            if condition['logical_op'] == 'AND':
+                return left and right
+            elif condition['logical_op'] == 'OR':
+                return left or right
             else:
-                return value
+                raise Exception(f"未知逻辑运算符: {condition['logical_op']}")
+        else:
+            left_val = row.get(condition['left'])
+            right_val = self._parse_condition_value(row, condition['right'], table)
+            op = condition['op']
 
-        right_val = process_value(right)
-
-        filtered = []
-        for row in rows:
-            if left not in row:
-                continue
-
-            left_val = row[left]
-
+            # 处理各操作符
             if op == 'EQ':
-                match = left_val == right_val
+                return left_val == right_val
             elif op == 'NEQ':
-                match = left_val != right_val
+                return left_val != right_val
             elif op == 'LT':
-                match = left_val < right_val
+                return left_val < right_val
             elif op == 'LTE':
-                match = left_val <= right_val
+                return left_val <= right_val
             elif op == 'GT':
-                match = left_val > right_val
+                return left_val > right_val
             elif op == 'GTE':
-                match = left_val >= right_val
+                return left_val >= right_val
             elif op == 'LIKE':
                 import re
-                # 将SQL的LIKE模式转换为正则表达式
                 pattern = re.escape(str(right_val)).replace('%', '.*').replace('_', '.')
-                regex = re.compile(f'^{pattern}$', re.IGNORECASE)
-                match = regex.match(str(left_val)) is not None
+                return re.match(pattern, str(left_val), re.IGNORECASE) is not None
             else:
                 raise Exception(f"不支持的操作符: {op}")
 
-            if match:
-                filtered.append(row)
+    def _parse_condition_value(self, row, value, table):
+        """解析条件的右值（可能是列名或字面量）"""
+        if isinstance(value, str) and value in table['columns']:
+            return row.get(value)  # 引用其他列的值
+        try:
+            return int(value)  # 尝试转为整数
+        except:
+            try:
+                return float(value)  # 尝试转为浮点数
+            except:
+                return str(value).strip("'")  # 字符串字面量
 
-        return filtered
+    # def _filter_rows(self, table, rows, where_clause):
+    #     if len(where_clause) != 3:
+    #         raise Exception("WHERE子句格式不正确，只支持简单的比较表达式")
+    #
+    #     left, op, right = where_clause
+    #
+    #     def process_value(value):
+    #         if isinstance(value, str):
+    #             return value
+    #         elif isinstance(value, int):
+    #             return value
+    #         elif isinstance(value, list) and value[0] == 'NUMBER':
+    #             return int(value[1])
+    #         elif isinstance(value, list) and value[0] == 'STRING':
+    #             return value[1]
+    #         else:
+    #             return value
+    #
+    #     right_val = process_value(right)
+    #
+    #     filtered = []
+    #     for row in rows:
+    #         if left not in row:
+    #             continue
+    #
+    #         left_val = row[left]
+    #
+    #         if op == 'EQ':
+    #             match = left_val == right_val
+    #         elif op == 'NEQ':
+    #             match = left_val != right_val
+    #         elif op == 'LT':
+    #             match = left_val < right_val
+    #         elif op == 'LTE':
+    #             match = left_val <= right_val
+    #         elif op == 'GT':
+    #             match = left_val > right_val
+    #         elif op == 'GTE':
+    #             match = left_val >= right_val
+    #         elif op == 'LIKE':
+    #             import re
+    #             # 将SQL的LIKE模式转换为正则表达式
+    #             pattern = re.escape(str(right_val)).replace('%', '.*').replace('_', '.')
+    #             regex = re.compile(f'^{pattern}$', re.IGNORECASE)
+    #             match = regex.match(str(left_val)) is not None
+    #         else:
+    #             raise Exception(f"不支持的操作符: {op}")
+    #
+    #         if match:
+    #             filtered.append(row)
+    #
+    #     return filtered
 
     def _delete(self, statement):
         """DELETE语句"""
@@ -1066,12 +1209,9 @@ class Database:
 """测试"""
 
 sql = """
-    -- 测试所有语句类型
-    CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL);
-    INSERT INTO users VALUES (1, 'Alice');
-    SELECT DISTINCT name FROM users WHERE id > 0 ORDER BY name DESC LIMIT 10;
-    UPDATE users SET name = 'Bob' WHERE id = 1;
-    DELETE FROM users WHERE id = 1;
+    SELECT * 
+    FROM users 
+    WHERE age > 25 AND (name LIKE 'A%' OR email LIKE '%example.com');
 """
 
 test_tokens = sql_lexer(sql)
@@ -1089,5 +1229,8 @@ age | id | name     | email                 |
 30  | 2  | Bob      | bob@example.com       |   
 35  | 3  | Charlie  | charlie@example.com   |   
 
+
+id |name  |age | email                 |     
+1  |Alice |28  | alice@example.com     |  
 
 """
