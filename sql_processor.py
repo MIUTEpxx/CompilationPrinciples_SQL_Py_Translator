@@ -152,7 +152,7 @@ def sql_lexer(input_str):
     def _read_identifier():
         """读取标识符或关键字"""
         start_pos = reader.pos
-        while (c := reader.peek()) and (c.isalnum() or c == '_'):
+        while (c := reader.peek()) and (c.isalnum() or c == '_') and c != 'eof':
             reader.next()
 
         value = reader.current_str[start_pos:reader.pos]
@@ -995,7 +995,7 @@ class SQLInterpreter:
             raise Exception(f"表 '{table_name}' 不存在")
 
         table = self.tables[table_name]
-        old_len = len(table)
+        old_len = len(table['data'])
         if not where_clause:
             table['data'] = []
             return
@@ -1003,7 +1003,7 @@ class SQLInterpreter:
         rows_to_delete = self._filter_rows(table, table['data'], where_clause)
         table['data'] = [row for row in table['data'] if row not in rows_to_delete]
 
-        if old_len == len(table):
+        if old_len == len(table['data']):
             raise Exception(f"删除失败, 未找到符合的记录 ")
 
     def _update(self, statement):
@@ -1283,3 +1283,7 @@ id |name  |age | email                 |
 1  |Alice |28  | alice@example.com     |  
 
 """
+
+
+
+
