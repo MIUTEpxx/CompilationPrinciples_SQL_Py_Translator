@@ -1,0 +1,78 @@
+--初始化
+
+CREATE TABLE users (
+    id INT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    age INT,
+    email VARCHAR(100) UNIQUE
+);
+
+INSERT INTO users VALUES (1, 'Alice', 28, 'alice@example.com');
+INSERT INTO users VALUES (2, 'Bob', 35, 'bob@example.com');
+INSERT INTO users VALUES (3, 'Charlie', 30, 'charlie@example.com');
+
+/* SELECT 测试 */
+-- 1. 基本聚合测试
+SELECT COUNT(*) AS total_users FROM users;        -- 预期 3
+SELECT AVG(age) AS average_age FROM users;       -- 预期 31.0
+SELECT SUM(age) AS total_age FROM users;         -- 预期 93
+SELECT MIN(age) AS min_age, MAX(age) AS max_age FROM users; -- 28 | 35
+
+-- 2. 条件聚合测试
+SELECT COUNT(*) AS over_30 FROM users WHERE age > 30; -- 预期 1 (Bob)
+SELECT AVG(age) AS b_names_avg FROM users WHERE name LIKE 'B%'; -- 预期 35.0
+
+-- 3. 补充数据测试分组 (执行这些INSERT后运行下方SQL)
+INSERT INTO users VALUES (4, 'David', 35, 'david@example.com');
+INSERT INTO users VALUES (5, 'Eva', 35, 'eva@example.com');
+
+-- 分组统计
+SELECT age, COUNT(*) AS count_ FROM users GROUP BY age ORDER BY age;
+/*
+预期结果：
+age | count
+28  | 1
+30  | 1
+35  | 3 (Bob+David+Eva)
+*/
+
+-- 4. DISTINCT 测试
+SELECT COUNT(DISTINCT age) AS unique_ages FROM users; -- 预期 3 (28,30,35)
+SELECT COUNT(DISTINCT email) AS unique_emails FROM users; -- 预期 5
+
+-- 5. 空集合测试
+SELECT MAX(age) FROM users WHERE age > 40; -- 预期 NULL 或空结果
+
+-- 6. 复合聚合测试
+SELECT 
+  COUNT(*) AS total_users,
+  AVG(age) AS avg_age,
+  SUM(age) AS total_age 
+FROM users;
+/*
+预期：
+total_users | avg_age | total_age
+5          | 32.6    | 163 (28+35+30+35+35)
+*/
+
+-- AND OR 测试
+SELECT * 
+FROM users 
+WHERE age > 25 AND age < 31 AND (name LIKE 'A%' OR email LIKE '%example.com');
+
+
+
+/* UPDATE 测试 */
+UPDATE users SET age = 66 WHERE age > 30 AND age <= 35;  
+UPDATE users SET age = age + 1 WHERE age < 35 ;
+UPDATE users SET age = id + 1 WHERE age < 35 ;
+UPDATE users SET age = id + 1 WHERE age = id ;
+UPDATE users SET id = 2 WHERE id = 3;  -- 尝试改为已存在的ID=2
+
+/* DELETE 测试 */
+DELETE FROM users WHERE age > 30;  -- 删除所有大于30岁的用户
+DELETE FROM users;  -- 无WHERE条件, 清空表
+
+/* DROP TABLE 测试 */
+DROP TABLE users;
+DROP TABLE non_existent_table;  -- 预期错误​：表 'non_existent_table' 不存在
