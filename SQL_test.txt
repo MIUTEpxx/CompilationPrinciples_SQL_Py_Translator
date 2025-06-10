@@ -1,3 +1,4 @@
+-- 本系统支持的SQL语句案例
 --初始化
 
 CREATE TABLE users (
@@ -7,9 +8,9 @@ CREATE TABLE users (
     email VARCHAR(100) UNIQUE
 );
 
-INSERT INTO users VALUES (1, 'Alice', 28, 'alice@example.com');
-INSERT INTO users VALUES (2, 'Bob', 35, 'bob@example.com');
-INSERT INTO users VALUES (3, 'Charlie', 30, 'charlie@example.com');
+INSERT INTO users VALUES (1, 'AAA', 28, 'aaa@example.com');
+INSERT INTO users VALUES (2, 'BBB', 35, 'bbb@example.com');
+INSERT INTO users VALUES (3, 'CCC', 30, 'ccc@example.com');
 
 /* SELECT 测试 */
 -- 1. 基本聚合测试
@@ -23,17 +24,17 @@ SELECT COUNT(*) AS over_30 FROM users WHERE age > 30; -- 预期 1 (Bob)
 SELECT AVG(age) AS b_names_avg FROM users WHERE name LIKE 'B%'; -- 预期 35.0
 
 -- 3. 补充数据测试分组 (执行这些INSERT后运行下方SQL)
-INSERT INTO users VALUES (4, 'David', 35, 'david@example.com');
-INSERT INTO users VALUES (5, 'Eva', 35, 'eva@example.com');
+INSERT INTO users VALUES (4, 'DDD', 35, 'ddd@example.com');
+INSERT INTO users VALUES (5, 'EEE', 35, 'eee@example.com');
 
 -- 分组统计
-SELECT age, COUNT(*) AS count_ FROM users GROUP BY age ORDER BY age;
+SELECT age, COUNT(*) AS count_ FROM users GROUP BY age ORDER BY age; -- desc;
 /*
 预期结果：
 age | count
 28  | 1
 30  | 1
-35  | 3 (Bob+David+Eva)
+35  | 3 (BBB+DDD+EEE)
 */
 
 -- 4. DISTINCT 测试
@@ -76,3 +77,36 @@ DELETE FROM users;  -- 无WHERE条件, 清空表
 /* DROP TABLE 测试 */
 DROP TABLE users;
 DROP TABLE non_existent_table;  -- 预期错误​：表 'non_existent_table' 不存在
+
+
+
+/*多表查询*/
+CREATE TABLE users (
+    id INT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    age INT
+);
+
+CREATE TABLE orders (
+    order_id INT PRIMARY KEY,
+    user_id INT,
+    product VARCHAR(50)
+);
+
+INSERT INTO users VALUES (1, 'Alice', 28);
+INSERT INTO users VALUES (2, 'Bob', 30);
+INSERT INTO users VALUES (3, 'Charlie', 25);
+INSERT INTO orders VALUES (101, 1, 'Laptop');
+INSERT INTO orders VALUES (102, 1, 'Mouse');
+INSERT INTO orders VALUES (103, 2, 'Keyboard');
+INSERT INTO orders VALUES (104, 3, 'Monitor');
+
+SELECT u.name, o.product FROM users AS u, orders AS o WHERE u.id = o.user_id;
+-- 带WHERE条件的多表查询
+SELECT u.name, o.product FROM users AS u, orders AS o WHERE u.id = o.user_id;
+    
+-- 带聚合函数的多表查询
+SELECT u.name, COUNT(*) AS order_count FROM users AS u, orders AS o WHERE u.id = o.user_id GROUP BY u.name;
+    
+-- 复杂条件查询
+SELECT u.name, o.product FROM users AS u, orders AS o WHERE u.age > 25 AND o.product LIKE 'K%';
