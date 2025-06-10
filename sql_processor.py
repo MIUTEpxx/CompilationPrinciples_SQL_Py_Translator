@@ -348,26 +348,71 @@ def sql_parser(tokens):
 
         # 解析选择的列
         while reader.peek() not in ('FROM', 'eof'):
-            if reader.peek() == 'ASTERISK':
+            # 处理带表名前缀的列名
+            if reader.peek() == 'IDENTIFIER' and reader.peek(1) == 'DOT':
+                table_name = reader.next()[1]  # 表名
+                reader.match('DOT')  # 吃掉点
+                column_name = reader.match('IDENTIFIER')[1]  # 列名
+                identifier = f"{table_name}.{column_name}"
+
+                # 处理别名
+                alias = None
+                if reader.peek() == 'AS':
+                    reader.next()
+                    alias = reader.match('IDENTIFIER')[1]
+                select_clause['columns'].append({
+                    'name': identifier,
+                    'alias': alias
+                })
+            # 处理通配符
+            elif reader.peek() == 'ASTERISK':
                 select_clause['columns'].append('*')
                 reader.next()
+            # 处理聚合函数
             elif reader.peek() in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):
                 func = parse_aggregate_function()
                 select_clause['columns'].append(func)
+            # 处理普通列名
             else:
-                # 处理列名和别名
                 col = reader.match('IDENTIFIER')[1]
+                # 处理别名
                 if reader.peek() == 'AS':
                     reader.next()
                     alias = reader.match('IDENTIFIER')[1]
                     select_clause['columns'].append({'name': col, 'alias': alias})
                 else:
                     select_clause['columns'].append(col)
+
+            # 处理逗号分隔
             if reader.peek() == 'COMMA':
                 reader.next()
 
         reader.match('FROM')
-        table_name = reader.match('IDENTIFIER')[1]
+
+        # 解析多表（逗号分隔）
+        tables = []
+        while True:
+            # 读取表名
+            table_name = reader.match('IDENTIFIER')[1]
+            alias = None
+
+            # 检查是否有别名
+            if reader.peek() == 'AS':
+                reader.next()  # 跳过AS
+                alias = reader.match('IDENTIFIER')[1]
+            elif reader.peek() == 'IDENTIFIER':  # AS关键字可选
+                alias = reader.match('IDENTIFIER')[1]
+
+            tables.append({
+                'name': table_name,
+                'alias': alias or table_name  # 如果没有别名，使用表名
+            })
+
+            # 检查是否有更多表
+            if reader.peek() == 'COMMA':
+                reader.next()  # 跳过逗号
+            else:
+                break
 
         # 解析WHERE子句
         where_clause = None
@@ -375,15 +420,22 @@ def sql_parser(tokens):
             reader.next()
             where_clause = parse_where_expression()
 
-        # 解析GROUP BY子句（新增部分）
+        # 解析GROUP BY子句
         group_by = None
         if reader.peek() == 'GROUP':
             reader.next()  # 吃掉GROUP
             reader.match('BY')  # 吃掉BY
             group_by = []
             while reader.peek() not in ('HAVING', 'ORDER', 'LIMIT', 'SEMI', 'eof'):
-                col = reader.match('IDENTIFIER')[1]
-                group_by.append(col)
+                # 处理带表名前缀的列名
+                if reader.peek() == 'IDENTIFIER' and reader.peek(1) == 'DOT':
+                    table_name = reader.next()[1]  # 表名
+                    reader.match('DOT')  # 吃掉点
+                    column_name = reader.match('IDENTIFIER')[1]  # 列名
+                    group_by.append(f"{table_name}.{column_name}")
+                else:
+                    col = reader.match('IDENTIFIER')[1]
+                    group_by.append(col)
                 if reader.peek() == 'COMMA':
                     reader.next()
 
@@ -394,7 +446,15 @@ def sql_parser(tokens):
             reader.match('BY')
             order_by = []
             while reader.peek() not in ('LIMIT', 'SEMI', 'eof'):
-                col = reader.match('IDENTIFIER')[1]
+                # 处理带表名前缀的列名
+                if reader.peek() == 'IDENTIFIER' and reader.peek(1) == 'DOT':
+                    table_name = reader.next()[1]  # 表名
+                    reader.match('DOT')  # 吃掉点
+                    column_name = reader.match('IDENTIFIER')[1]  # 列名
+                    col = f"{table_name}.{column_name}"
+                else:
+                    col = reader.match('IDENTIFIER')[1]
+
                 direction = 'ASC'
                 if reader.peek() in ('ASC', 'DESC'):
                     direction = reader.next()[0]
@@ -411,9 +471,9 @@ def sql_parser(tokens):
         return {
             'type': 'select',
             'select': select_clause,
-            'table': table_name,
+            'tables': tables,  # 多表信息
             'where': where_clause,
-            'group_by': group_by,  # 新增group_by字段
+            'group_by': group_by,
             'order_by': order_by,
             'limit': limit
         }
@@ -442,42 +502,77 @@ def sql_parser(tokens):
         return left
 
     def parse_primary_condition():
-        """解析基础条件或括号内的表达式"""
+        """解析基础条件或括号内的表达式（支持带表别名的列名）"""
         if reader.peek() == 'LPAREN':
             reader.next()  # 吃掉 '('
             expr = parse_logical_expression()
             reader.match('RPAREN')  # 吃掉 ')'
             return expr
         else:
-            # 解析列名、操作符和值
-            left = reader.match('IDENTIFIER')[1]
+            # 解析左值（支持带表别名的列名）
+            left_parts = []
+            while True:
+                if reader.peek() == 'IDENTIFIER':
+                    left_parts.append(reader.next()[1])
+                else:
+                    break
+
+                if reader.peek() == 'DOT':
+                    reader.next()  # 吃掉点号
+                else:
+                    break
+
+            left = '.'.join(left_parts)
+
+            # 读取操作符
             op_token = reader.current_val
-            right = -1
             op = None
             if op_token[1] == 'OPERATOR':
                 op = op_token[0]
                 reader.next()  # 吃掉操作符
             else:
                 _error(f"期望操作符，得到 {op_token[0]}")
-            # 解析右值
-            if reader.peek() in ('NUMBER', 'STRING'):
-                right = reader.next()[1]
+
+            # 解析右值（支持带表别名的列名）
+            # 根据token类型分别处理
+            if reader.peek() == 'NUMBER':
+                # 数字字面量 - 保留原始数值
+                token = reader.next()
+                right = token[1]  # 直接使用数字值（int或float）
+            elif reader.peek() == 'STRING':
+                # 字符串字面量 - 保留原始字符串
+                token = reader.next()
+                right = token[1]
             elif reader.peek() == 'IDENTIFIER':
-                right = reader.next()[1]
+                # 标识符，可能是带表别名的列名
+                right_parts = []
+                while True:
+                    if reader.peek() == 'IDENTIFIER':
+                        right_parts.append(reader.next()[1])
+                    else:
+                        break
+
+                    if reader.peek() == 'DOT':
+                        reader.next()  # 吃掉点号
+                    else:
+                        break
+
+                right = '.'.join(right_parts)
             else:
                 _error(f"期望值或列名，得到 {reader.peek()}")
+
             return {'left': left, 'op': op, 'right': right}
 
     def parse_aggregate_function():
         """聚合函数解析"""
         func_name = reader.next()[0]
-        reader.match('LPAREN')   # 吃掉 (
+        reader.match('LPAREN')  # 吃掉 (
 
         # 处理可能存在的DISTINCT关键字
         distinct = False
         if reader.peek() == 'DISTINCT':
-            reader.next()  # 吃掉DISTINCT
             distinct = True
+            reader.next()  # 吃掉DISTINCT
 
         # 解析参数（列名或*）
         if reader.peek() == 'ASTERISK':
@@ -485,7 +580,8 @@ def sql_parser(tokens):
             reader.next()
         else:
             arg = reader.match('IDENTIFIER')[1]
-        reader.match('RPAREN')   # 吃掉 )
+
+        reader.match('RPAREN')  # 吃掉 )
 
         # 处理AS子句
         alias = None
@@ -497,7 +593,7 @@ def sql_parser(tokens):
             'name': func_name,
             'arg': arg,
             'alias': alias,
-            'distinct': distinct  # 添加distinct字段
+            'distinct': distinct  # 保留在聚合函数中的distinct字段
         }
 
     def parse_delete():
@@ -552,7 +648,8 @@ def sql_parser(tokens):
 
 
 
-# ===== SQL解释器 =====
+# ===== SQL解释器 语义分析+解释执行 =====
+
 class SQLInterpreter:
     def __init__(self):
         self.tables = {}  # 表结构存储
@@ -673,144 +770,189 @@ class SQLInterpreter:
 
     def _select(self, statement):
         """
-        SELECT 查找语句实现
+        SELECT 查找语句实现（多表支持）
         """
-        # 参数提取
-        table_name = statement['table']  # 要查找的表名
-        select_clause = statement['select']   # SELECT子句
-        where_clause = statement['where']  # WHERE条件
-        order_by = statement['order_by']
-        group_by = statement.get('group_by', []) or []  # 强制保证是列表类型
-        limit = statement['limit']
 
-        if table_name not in self.tables:
-            raise Exception(f"表 '{table_name}' 不存在")
+        # 辅助函数：解析列名，返回带表别名前缀的列名
+        def resolve_col_name(col_name, tables_info, row):
+            # 如果列名已经包含点（即带有表别名），则直接返回
+            if '.' in col_name:
+                return col_name
+            # 否则，尝试在所有表的别名中查找
+            for table_info in tables_info:
+                alias = table_info['alias'] or table_info['name']
+                prefixed = f"{alias}.{col_name}"
+                if prefixed in row:
+                    return prefixed
+            # 如果找不到，返回原始列名
+            return col_name
 
-        # 获取表结构和列名 第一步：from语句，选择要操作的表
-        table = self.tables[table_name]
-        columns = list(table['columns'].keys())
 
-        # WHERE 条件过滤数据行 第二步：where语句，在from后的表中设置筛选条件，筛选出符合条件的记录。
-        filtered_rows = table['data']
+        # 从statement中获取tables列表
+        tables_info = statement['tables']
+        select_clause = statement['select']
+        where_clause = statement['where']
+        group_by = statement.get('group_by', []) or []
+        order_by = statement.get('order_by', None)
+        limit = statement.get('limit', None)
+
+        # 验证所有表都存在
+        for table_info in tables_info:
+            table_name = table_info['name']
+            if table_name not in self.tables:
+                raise Exception(f"表 '{table_name}' 不存在")
+
+        # 创建笛卡尔积
+        cartesian_product = [{}]  # 起始空行
+
+        # 为每个表添加前缀
+        for table_info in tables_info:
+            table_name = table_info['name']
+            alias = table_info['alias'] or table_name
+            table_data = self.tables[table_name]['data']
+            new_product = []
+
+            for row in table_data:
+                # 创建带表前缀的行
+                prefixed_row = {}
+                for col_name, value in row.items():
+                    prefixed_row[f"{alias}.{col_name}"] = value
+
+                # 添加到笛卡尔积
+                for existing in cartesian_product:
+                    new_row = existing.copy()
+                    new_row.update(prefixed_row)
+                    new_product.append(new_row)
+
+            cartesian_product = new_product
+
+        # WHERE 条件过滤
         if where_clause:
-            filtered_rows = self._filter_rows(table, filtered_rows, where_clause)
+            filtered_rows = self._filter_rows(tables_info, cartesian_product, where_clause)
+        else:
+            filtered_rows = cartesian_product
 
-        # 分组处理逻辑  第三步：group by语句，把筛选出的记录进行分组 顺序不对
+        # 分组处理
+        # 解析 group_by 中的列名为带表名前缀的列名
+        resolved_group_by = []
+        if group_by and filtered_rows:  # 确保有数据行可用
+            first_row = filtered_rows[0]  # 使用第一行来解析列名
+            for col in group_by:
+                resolved_col = resolve_col_name(col, tables_info, first_row)
+                resolved_group_by.append(resolved_col)
+        else:
+            resolved_group_by = group_by  # 如果没有分组列，保持原样
+
         grouped_data = {}
-        has_aggregate = False
-        if group_by:
-            # 按分组键建立字典
+        has_aggregate = self._contains_aggregate(select_clause)
+
+        if resolved_group_by:  # 使用解析后的分组列
+            # 处理带表前缀的分组键
             for row in filtered_rows:
-                key = tuple(row[col] for col in group_by)
+                key = tuple(row[col] for col in resolved_group_by)
                 if key not in grouped_data:
                     grouped_data[key] = []
                 grouped_data[key].append(row)
+        elif has_aggregate:
+            # 聚合查询但没有GROUP BY，视为一个分组
+            grouped_data[()] = filtered_rows
         else:
-            # # 无分组时视为一个组
-            # grouped_data[()] = filtered_rows
-            # 新增：当没有GROUP BY时，检查是否包含聚合函数
-            has_aggregate = any(
-                isinstance(col, dict) and
-                col.get('name') in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX')
-                for col in select_clause['columns']
-            )
+            # 没有分组也没有聚合，每行单独处理
+            for i, row in enumerate(filtered_rows):
+                grouped_data[(i,)] = [row]
 
-            if has_aggregate:
-                # 有聚合函数时视为一个分组
-                grouped_data[()] = filtered_rows
-            else:
-                # 没有聚合函数时每行单独处理
-                for i, row in enumerate(filtered_rows):
-                    grouped_data[(i,)] = [row]  # 使用行索引作为唯一分组键
-
-        # 第四步：处理 SELECT 列（包含聚合函数）
+        # 处理SELECT列
         result = []
         for group_key, group_rows in grouped_data.items():
-            # 处理聚合函数列
+            # 处理聚合函数
             agg_results = self._apply_aggregate_functions(
-                table,
+                tables_info,
                 group_rows,
                 [col for col in select_clause['columns']
-                 if isinstance(col, dict) and col.get('name') in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX')]
+                 if isinstance(col, dict) and col['name'] in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX')]
             )
 
             # 构建结果行
-            if group_by or has_aggregate:
-                # 分组或聚合查询：每个分组生成一行
-                result_row = {}
-                # 添加分组列
-                for i, col in enumerate(group_by or []):
-                    result_row[col] = group_key[i]
-                # 添加聚合结果
-                if agg_results:
-                    result_row.update(agg_results[0])
-                # 添加普通列（仅当有分组时）
-                if not has_aggregate:
-                    for col in select_clause['columns']:
-                        # 处理通配符 *
-                        if col == '*':
-                            for column_name in columns:
-                                result_row.update(group_rows[0])
-                        else:
-                            if not isinstance(col, dict):
-                                col_name = col['name'] if isinstance(col, dict) else col
-                                result_row[col_name] = group_rows[0][col_name]
+            result_row = {}
 
-                result.append(result_row)
-            else:
-                # 普通查询：每行单独输出
-                for row in group_rows:
-                    result_row = {}
-                    for col in select_clause['columns']:
-                        # 处理通配符 *
-                        if col == '*':
-                            for column_name in columns:
-                                result_row[column_name] = row[column_name]
-                        # 处理普通列或聚合函数
-                        else:
-                            if isinstance(col, dict):
-                                # 处理带别名的列或聚合函数
-                                col_name = col.get('alias', col['name'])
-                                result_row[col_name] = row[col['name']]
-                            else:
-                                # 普通列名
-                                result_row[col] = row[col]
-                    result.append(result_row)
+            # 添加分组列
+            if group_by:
+                for i, col in enumerate(group_by):
+                    # 解析分组列名
+                    full_col_name = resolve_col_name(col, tables_info, group_rows[0])
+                    result_row[col] = group_rows[0].get(full_col_name)
 
-        # 第五步：处理DISTINCT
-        if select_clause['distinct']:
+                    # 添加聚合结果
+            if agg_results:
+                result_row.update(agg_results[0])
+
+            # 添加普通列
+            for col in select_clause['columns']:
+                if col == '*':  # 处理通配符
+                    for table_info in tables_info:
+                        alias = table_info['alias'] or table_info['name']
+                        table_cols = self.tables[table_info['name']]['columns'].keys()
+                        for col_name in table_cols:
+                            prefixed = f"{alias}.{col_name}"
+                            result_row[prefixed] = group_rows[0].get(prefixed)
+                elif isinstance(col, dict):  # 聚合函数或带别名的列
+                    if col['name'] not in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):  # 普通列
+                        # 解析列名
+                        full_col_name = resolve_col_name(col['name'], tables_info, group_rows[0])
+                        alias = col.get('alias')
+                        if alias:
+                            result_row[alias] = group_rows[0].get(full_col_name)
+                        else:
+                            result_row[col['name']] = group_rows[0].get(full_col_name)
+                else:  # 简单列名
+                    # 解析列名
+                    full_col_name = resolve_col_name(col, tables_info, group_rows[0])
+                    result_row[col] = group_rows[0].get(full_col_name)
+
+            result.append(result_row)
+
+        # 处理DISTINCT
+        if select_clause.get('distinct', False):
             seen = set()
-            unique_result = []
+            distinct_result = []
             for row in result:
-                row_tuple = tuple(sorted((k, v) for k, v in row.items() if k in select_clause['columns']))
+                # 使用所有列创建元组
+                row_tuple = tuple(row.items())
                 if row_tuple not in seen:
                     seen.add(row_tuple)
-                    unique_result.append(row)
-            result = unique_result
+                    distinct_result.append(row)
+            result = distinct_result
 
-
-        #  ORDER BY排序  第六步：order by语句：将select后的结果集按照顺序展示出来 顺序不对
+        # ORDER BY排序
         if order_by:
-            # 获取所有排序字段的值（支持嵌套字段）
             def get_sort_key(row):
                 keys = []
                 for order in order_by:
-                    value = row
-                    for part in order['column'].split('.'):
-                        value = value.get(part, None)
-                    keys.append(value)
+                    col = order['column']
+                    # 尝试查找带前缀的列
+                    if '.' not in col:
+                        found = False
+                        for table_info in tables_info:
+                            alias = table_info['alias'] or table_info['name']
+                            prefixed = f"{alias}.{col}"
+                            if prefixed in row:
+                                keys.append(row[prefixed])
+                                found = True
+                                break
+                        if not found:
+                            keys.append(row.get(col))
+                    else:
+                        keys.append(row.get(col))
                 return keys
 
             reverse_flag = any(order['direction'] == 'DESC' for order in order_by)
             result = sorted(result, key=get_sort_key, reverse=reverse_flag)
 
-
-        #  LIMIT限制结果数量  # 第七步：LIMIT 限制
+        # LIMIT限制
         if limit is not None:
             result = result[:limit]
 
         return result
-
     def _contains_aggregate(self, select_clause):
         """检查SELECT子句是否包含聚合函数"""
         return any(
@@ -819,86 +961,215 @@ class SQLInterpreter:
             for col in select_clause['columns']
         )
 
-    def _apply_aggregate_functions(self, table, rows, columns):
-        """处理聚合函数（如 COUNT、SUM、AVG DISTINCT等）"""
-        result = [{}]  # 初始化结果集（每个聚合函数一个结果行）
+    def _apply_aggregate_functions(self, tables_info, rows, columns):
+        """处理聚合函数（多表支持）"""
 
-        # 遍历所有选择列（可能是普通列或聚合函数）
+        # 获取所有表的别名
+        table_aliases = [table_info['alias'] for table_info in tables_info]
+
+        def resolve_column_name(col_name):
+            """解析列名，添加表别名前缀"""
+            if '.' in col_name:
+                return col_name
+
+            for alias in table_aliases:
+                prefixed_name = f"{alias}.{col_name}"
+                if any(prefixed_name in row for row in rows):
+                    return prefixed_name
+
+            return col_name
+
+        result = [{}]  # 初始化结果集
+
         for col in columns:
-            # 检查是否为聚合函数（COUNT/SUM/AVG/MIN/MAX）
-            if isinstance(col, dict) and 'name' in col and col['name'] in ('COUNT', 'SUM', 'AVG', 'MIN', 'MAX'):
-                func = col
-                distinct = func.get('distinct', False)
-                func_name = col['name']  # 获取函数名（如COUNT）
-                arg = col['arg']    # 获取参数（如* 或列名）
-                alias = col.get('alias', f"{func_name}({arg})")  # 获取或生成别名 AS xxx
+            if not isinstance(col, dict):
+                continue
 
-                # 处理DISTINCT：对数据进行去重
-                distinct_values = []
-                if distinct:
-                    seen = set()
-                    for row in rows:
-                        val = row.get(arg)
-                        if val is None:
-                            continue
-                        if val not in seen:
-                            seen.add(val)
-                            distinct_values.append(val)
-                    data_source = distinct_values
+            func_name = col['name']
+            arg = resolve_column_name(col['arg'])  # 解析聚合函数参数
+            alias = col.get('alias', f"{func_name}({arg})")
+            distinct = col.get('distinct', False)  # 获取DISTINCT标志
+
+            # 查找带表前缀的列
+            values = []
+            for row in rows:
+                # 优先查找带前缀的列
+                if '.' in arg:
+                    value = row.get(arg)
                 else:
-                    data_source = [row.get(arg) for row in rows if arg in row]
+                    # 尝试所有可能的表前缀
+                    for table_info in tables_info:
+                        table_alias = table_info['alias'] or table_info['name']
+                        prefixed = f"{table_alias}.{arg}"
+                        if prefixed in row:
+                            value = row[prefixed]
+                            break
+                    else:
+                        value = row.get(arg)  # 最后尝试无前缀
+                if value is not None:
+                    values.append(value)
 
-                # 处理COUNT函数
-                if func_name == 'COUNT':
-                    if arg == '*':   # COUNT(*)
-                        result[0][alias] = len(rows) if not distinct else len(distinct_values) # 直接计算行数
-                    else:  # COUNT(列名)
-                        # 统计非空值的数量
-                        count = sum(1 for v in data_source if v is not None)
-                        result[0][alias] = count
+            # 如果指定了DISTINCT，则去重
+            if distinct:
+                # 使用集合去重（注意：值必须是可哈希的）
+                try:
+                    distinct_values = set(values)
+                    values = list(distinct_values)
+                except TypeError:
+                    # 如果值不可哈希（如列表），则使用另一种方式去重
+                    seen = set()
+                    distinct_values = []
+                    for v in values:
+                        # 使用元组表示不可哈希的值
+                        key = tuple(v) if isinstance(v, list) else v
+                        if key not in seen:
+                            seen.add(key)
+                            distinct_values.append(v)
+                    values = distinct_values
 
-                # 处理SUM/AVG/MIN/MAX函数
-                elif func_name in ('SUM', 'AVG', 'MIN', 'MAX'):
-                    # 验证列是否存在
-                    values = []
-                    for row in rows:
-                        val = row.get(arg)
-                        if isinstance(val, (int, float)):
-                            values.append(val)
+            # 处理COUNT函数
+            if func_name == 'COUNT':
+                if arg == '*':
+                    result[0][alias] = len(rows)
+                else:
+                    result[0][alias] = len(values)  # 使用去重后的值
 
-                    if not values:
-                        result[0][alias] = None
-                        continue
+            # 处理其他聚合函数
+            elif func_name in ('SUM', 'AVG', 'MIN', 'MAX'):
+                if not values:
+                    result[0][alias] = None
+                    continue
 
-                    if func_name == 'SUM':
-                        result[0][alias] = sum(values)
-                    elif func_name == 'AVG':
-                        result[0][alias] = sum(values) / len(values)
-                    elif func_name == 'MIN':
-                        result[0][alias] = min(values)
-                    elif func_name == 'MAX':
-                        result[0][alias] = max(values)
+                try:
+                    numeric_values = [float(v) for v in values if v is not None]
+                except ValueError:
+                    result[0][alias] = None
+                    continue
+
+                if not numeric_values:
+                    result[0][alias] = None
+                elif func_name == 'SUM':
+                    result[0][alias] = sum(numeric_values)
+                elif func_name == 'AVG':
+                    result[0][alias] = sum(numeric_values) / len(numeric_values)
+                elif func_name == 'MIN':
+                    result[0][alias] = min(numeric_values)
+                elif func_name == 'MAX':
+                    result[0][alias] = max(numeric_values)
 
         return result
 
-    def _filter_rows(self, table, rows, condition):
-        """根据条件表达式树过滤行"""
-        return [row for row in rows if self._evaluate_condition(row, condition, table)]
+    def _filter_rows(self, tables_info, rows, where_clause):
 
-    def _evaluate_condition(self, row, condition, table):
+        # 获取所有表的别名
+        table_aliases = [table_info['alias'] for table_info in tables_info]
+
+        def resolve_column_name(col_name, tables_info, row):
+            """解析列名，添加表别名前缀"""
+            # 如果列名已经包含点（即带有表别名），则直接返回
+            if '.' in col_name:
+                return col_name
+            # 否则，尝试在所有表的别名中查找
+            for table_info in tables_info:
+                alias = table_info['alias'] or table_info['name']
+                prefixed = f"{alias}.{col_name}"
+                if prefixed in row:
+                    return prefixed
+            # 如果找不到，返回原始列名
+            return col_name
+
+        def evaluate_condition(row, condition):
+            # 解析左值（添加表别名前缀）
+            left = resolve_column_name(condition['left'], tables_info, row)
+            op = condition['op']
+            right = condition['right']
+
+            left_value = row.get(left)
+
+            # 处理右值
+            # 如果右值是字符串，并且不包含点号，尝试解析为列名
+            if isinstance(right, str) and '.' not in right:
+                # 尝试解析为列名
+                resolved_right = resolve_column_name(right, tables_info, row)
+                # 如果解析后的列名在行中存在，则使用列值
+                if resolved_right in row:
+                    right_value = row[resolved_right]
+                else:
+                    # 否则，视为字符串字面量
+                    right_value = right
+            elif isinstance(right, str) and '.' in right:
+                # 如果右值包含点号，直接作为列名处理
+                right_value = row.get(right)
+            else:
+                # 其他类型（数字等）直接使用
+                right_value = right
+
+            # 类型检查和转换
+            if op in ['LT', 'LTE', 'GT', 'GTE']:
+                # 确保比较的是数字类型
+                try:
+                    if left_value is not None:
+                        left_value = float(left_value)
+                    if right_value is not None:
+                        right_value = float(right_value)
+                except (TypeError, ValueError):
+                    raise Exception(f"操作符 {op} 要求数字类型, 但得到 {type(left_value)} 和 {type(right_value)}")
+
+            # 执行比较操作
+            if op == 'EQ':
+                return left_value == right_value
+            elif op == 'NEQ':
+                return left_value != right_value
+            elif op == 'LT':
+                return left_value < right_value
+            elif op == 'LTE':
+                return left_value <= right_value
+            elif op == 'GT':
+                return left_value > right_value
+            elif op == 'GTE':
+                return left_value >= right_value
+            elif op == 'LIKE':
+                import re
+                # 将 SQL LIKE 模式转换为正则表达式
+                pattern = re.escape(str(right_value)).replace('%', '.*').replace('_', '.')
+                return re.match(f"^{pattern}$", str(left_value), re.IGNORECASE) is not None
+            else:
+                raise Exception(f"不支持的操作符: {op}")
+
+        def evaluate_logical_expression(row, expr):
+            if isinstance(expr, dict):
+                if 'logical_op' in expr:
+                    left_result = evaluate_logical_expression(row, expr['left'])
+                    right_result = evaluate_logical_expression(row, expr['right'])
+                    if expr['logical_op'] == 'AND':
+                        return left_result and right_result
+                    elif expr['logical_op'] == 'OR':
+                        return left_result or right_result
+                else:
+                    return evaluate_condition(row, expr)
+            return expr
+
+        return [row for row in rows if evaluate_logical_expression(row, where_clause)]
+
+    def _evaluate_condition(self, row, condition, tables):
         """递归评估条件表达式"""
         if 'logical_op' in condition:
-            left = self._evaluate_condition(row, condition['left'], table)
-            right = self._evaluate_condition(row, condition['right'], table)
+            # 递归评估左侧表达式
+            left = self._evaluate_condition(row, condition['left'], tables)
+            # 递归评估右侧表达式
+            right = self._evaluate_condition(row, condition['right'], tables)
+            # 应用逻辑运算
             if condition['logical_op'] == 'AND':
                 return left and right
             elif condition['logical_op'] == 'OR':
                 return left or right
             else:
                 raise Exception(f"未知逻辑运算符: {condition['logical_op']}")
+        # 处理基本比较条件
         else:
-            left_val = row.get(condition['left'])
-            right_val = self._parse_condition_value(row, condition['right'], table)
+            # 处理带表名前缀的列名
+            left_val = self._get_column_value(row, condition['left'], tables)
+            right_val = self._parse_condition_value(row, condition['right'], tables)
             op = condition['op']
 
             # 处理各操作符
@@ -921,6 +1192,27 @@ class SQLInterpreter:
             else:
                 raise Exception(f"不支持的操作符: {op}")
 
+    def _get_column_value(self, row, column_name, tables):
+        """获取列值（支持带表名前缀的列名）"""
+        # 如果有显式的表名前缀
+        if '.' in column_name:
+            return row.get(column_name)
+
+        # 没有前缀时，尝试在所有表中查找
+        values = []
+        for table in tables:
+            alias = table['alias']
+            prefixed_name = f"{alias}.{column_name}"
+            if prefixed_name in row:
+                values.append(row[prefixed_name])
+
+        if len(values) == 1:
+            return values[0]
+        elif len(values) > 1:
+            raise Exception(f"列名 '{column_name}' 存在歧义，请使用表名前缀")
+        else:
+            return None
+
     def _parse_condition_value(self, row, value, table):
         """解析条件的右值（可能是列名或字面量）"""
         if isinstance(value, str) and value in table['columns']:
@@ -933,58 +1225,6 @@ class SQLInterpreter:
             except:
                 return str(value).strip("'")  # 字符串字面量
 
-    # def _filter_rows(self, table, rows, where_clause):
-    #     if len(where_clause) != 3:
-    #         raise Exception("WHERE子句格式不正确，只支持简单的比较表达式")
-    #
-    #     left, op, right = where_clause
-    #
-    #     def process_value(value):
-    #         if isinstance(value, str):
-    #             return value
-    #         elif isinstance(value, int):
-    #             return value
-    #         elif isinstance(value, list) and value[0] == 'NUMBER':
-    #             return int(value[1])
-    #         elif isinstance(value, list) and value[0] == 'STRING':
-    #             return value[1]
-    #         else:
-    #             return value
-    #
-    #     right_val = process_value(right)
-    #
-    #     filtered = []
-    #     for row in rows:
-    #         if left not in row:
-    #             continue
-    #
-    #         left_val = row[left]
-    #
-    #         if op == 'EQ':
-    #             match = left_val == right_val
-    #         elif op == 'NEQ':
-    #             match = left_val != right_val
-    #         elif op == 'LT':
-    #             match = left_val < right_val
-    #         elif op == 'LTE':
-    #             match = left_val <= right_val
-    #         elif op == 'GT':
-    #             match = left_val > right_val
-    #         elif op == 'GTE':
-    #             match = left_val >= right_val
-    #         elif op == 'LIKE':
-    #             import re
-    #             # 将SQL的LIKE模式转换为正则表达式
-    #             pattern = re.escape(str(right_val)).replace('%', '.*').replace('_', '.')
-    #             regex = re.compile(f'^{pattern}$', re.IGNORECASE)
-    #             match = regex.match(str(left_val)) is not None
-    #         else:
-    #             raise Exception(f"不支持的操作符: {op}")
-    #
-    #         if match:
-    #             filtered.append(row)
-    #
-    #     return filtered
 
     def _delete(self, statement):
         """DELETE语句"""
@@ -996,12 +1236,17 @@ class SQLInterpreter:
 
         table = self.tables[table_name]
         old_len = len(table['data'])
-        if not where_clause:
-            table['data'] = []
-            return
 
-        rows_to_delete = self._filter_rows(table, table['data'], where_clause)
-        table['data'] = [row for row in table['data'] if row not in rows_to_delete]
+        if where_clause:
+            # 修复：创建正确的 tables_info 结构
+            tables_info = [{
+                'name': table_name,
+                'alias': table_name  # 使用表名作为别名
+            }]
+            rows_to_delete = self._filter_rows(tables_info, table['data'], where_clause)
+            table['data'] = [row for row in table['data'] if row not in rows_to_delete]
+        else:
+            table['data'] =  []
 
         if old_len == len(table['data']):
             raise Exception(f"删除失败, 未找到符合的记录 ")
@@ -1026,7 +1271,12 @@ class SQLInterpreter:
         # 确定要更新的行
         rows_to_update = table['data']
         if where_clause:
-            rows_to_update = self._filter_rows(table, rows_to_update, where_clause)
+            # 修复：创建正确的 tables_info 结构
+            tables_info = [{
+                'name': table_name,
+                'alias': table_name  # 使用表名作为别名
+            }]
+            rows_to_update = self._filter_rows(tables_info, rows_to_update, where_clause)
             if len(rows_to_update) == 0:
                 raise Exception(f"更新失败, 未找到符合的记录 ")
 
@@ -1287,3 +1537,20 @@ id |name  |age | email                 |
 
 
 
+"""
+def consume(tokens, expected_type, expected_value):
+    if not tokens:
+   	    raise SyntaxError("Unexpected end of statement")
+    token = tokens[0]
+    if token.type != expected_type or token.value != expected_value:
+   	    line, col = get_token_position(token)  # 获取Token位置
+    raise SyntaxError(f"Line {line}, Column {col}: Expected {expected_value}, got {token.value}")
+    tokens.pop(0)
+    return token
+
+
+
+
+
+
+"""
